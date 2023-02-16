@@ -37,7 +37,7 @@ pub trait Trie<D: DB, H: Hasher> {
     /// If the trie does not contain a value for key, the returned proof contains all
     /// nodes of the longest existing prefix of the key (at least the root node), ending
     /// with the node that proves the absence of the key.
-    fn get_proof(&self, key: &[u8]) -> TrieResult<Vec<Vec<u8>>>;
+    fn get_proof(&mut self, key: &[u8]) -> TrieResult<Vec<Vec<u8>>>;
 
     /// return value if key exists, None if key not exist, Error if proof is wrong
     fn verify_proof(
@@ -61,9 +61,9 @@ where
     hasher: Arc<H>,
     backup_db: Option<Arc<D>>,
 
-    cache: RefCell<HashMap<Vec<u8>, Vec<u8>>>,
-    passing_keys: RefCell<HashSet<Vec<u8>>>,
-    gen_keys: RefCell<HashSet<Vec<u8>>>,
+    cache: HashMap<Vec<u8>, Vec<u8>>,
+    passing_keys: HashSet<Vec<u8>>,
+    gen_keys: HashSet<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -217,9 +217,9 @@ where
             root: Node::Empty,
             root_hash: hasher.digest(rlp::NULL_RLP.as_ref()),
 
-            cache: RefCell::new(HashMap::new()),
-            passing_keys: RefCell::new(HashSet::new()),
-            gen_keys: RefCell::new(HashSet::new()),
+            cache: HashMap::new(),
+            passing_keys: HashSet::new(),
+            gen_keys: HashSet::new(),
 
             db,
             hasher,
@@ -234,9 +234,9 @@ where
                     root: Node::Empty,
                     root_hash: root.to_vec(),
 
-                    cache: RefCell::new(HashMap::new()),
-                    passing_keys: RefCell::new(HashSet::new()),
-                    gen_keys: RefCell::new(HashSet::new()),
+                    cache: HashMap::new(),
+                    passing_keys: HashSet::new(),
+                    gen_keys: HashSet::new(),
 
                     db,
                     hasher,
@@ -261,9 +261,9 @@ where
             root: Node::Empty,
             root_hash: hasher.digest(rlp::NULL_RLP.as_ref()),
 
-            cache: RefCell::new(HashMap::new()),
-            passing_keys: RefCell::new(HashSet::new()),
-            gen_keys: RefCell::new(HashSet::new()),
+            cache: HashMap::new(),
+            passing_keys: HashSet::new(),
+            gen_keys: HashSet::new(),
 
             db,
             hasher,
@@ -277,13 +277,11 @@ where
         let mut addr_list = vec![];
         pt.iter().for_each(|(k, _v)| addr_list.push(k));
         let encoded = pt.cache_node(root)?;
-        pt.cache
-            .borrow_mut()
-            .insert(pt.hasher.digest(&encoded), encoded);
+        pt.cache.insert(pt.hasher.digest(&encoded), encoded);
 
-        let mut keys = Vec::with_capacity(pt.cache.borrow().len());
-        let mut values = Vec::with_capacity(pt.cache.borrow().len());
-        for (k, v) in pt.cache.borrow_mut().drain() {
+        let mut keys = Vec::with_capacity(pt.cache.len());
+        let mut values = Vec::with_capacity(pt.cache.len());
+        for (k, v) in pt.cache.drain() {
             keys.push(k.to_vec());
             values.push(v);
         }
@@ -352,7 +350,7 @@ where
     /// If the trie does not contain a value for key, the returned proof contains all
     /// nodes of the longest existing prefix of the key (at least the root node), ending
     /// with the node that proves the absence of the key.
-    fn get_proof(&self, key: &[u8]) -> TrieResult<Vec<Vec<u8>>> {
+    fn get_proof(&mut self, key: &[u8]) -> TrieResult<Vec<Vec<u8>>> {
         let mut path =
             self.get_path_at(self.root.clone(), &Nibbles::from_raw(key.to_vec(), true))?;
         match self.root {
@@ -429,7 +427,7 @@ where
         }
     }
 
-    fn insert_at(&self, n: Node, partial: Nibbles, value: Vec<u8>) -> TrieResult<Node> {
+    fn insert_at(&mut self, n: Node, partial: Nibbles, value: Vec<u8>) -> TrieResult<Node> {
         match n {
             Node::Empty => Ok(Node::from_leaf(partial, value)),
             Node::Leaf(leaf) => {
@@ -519,16 +517,14 @@ where
             Node::Hash(hash_node) => {
                 let borrow_hash_node = hash_node.borrow();
 
-                self.passing_keys
-                    .borrow_mut()
-                    .insert(borrow_hash_node.hash.to_vec());
+                self.passing_keys.insert(borrow_hash_node.hash.to_vec());
                 let n = self.recover_from_db(&borrow_hash_node.hash)?;
                 self.insert_at(n, partial, value)
             }
         }
     }
 
-    fn delete_at(&self, n: Node, partial: &Nibbles) -> TrieResult<(Node, bool)> {
+    fn delete_at(&mut self, n: Node, partial: &Nibbles) -> TrieResult<(Node, bool)> {
         let (new_n, deleted) = match n {
             Node::Empty => Ok((Node::Empty, false)),
             Node::Leaf(leaf) => {
@@ -578,7 +574,7 @@ where
             }
             Node::Hash(hash_node) => {
                 let hash = hash_node.borrow().hash.clone();
-                self.passing_keys.borrow_mut().insert(hash.clone());
+                self.passing_keys.insert(hash.clone());
 
                 let n = self.recover_from_db(&hash)?;
                 self.delete_at(n, partial)
@@ -592,7 +588,7 @@ where
         }
     }
 
-    fn degenerate(&self, n: Node) -> TrieResult<Node> {
+    fn degenerate(&mut self, n: Node) -> TrieResult<Node> {
         match n {
             Node::Branch(branch) => {
                 let borrow_branch = branch.borrow();
@@ -643,7 +639,7 @@ where
                     // try again after recovering node from the db.
                     Node::Hash(hash_node) => {
                         let hash = hash_node.borrow().hash.clone();
-                        self.passing_keys.borrow_mut().insert(hash.clone());
+                        self.passing_keys.insert(hash.clone());
 
                         let new_node = self.recover_from_db(&hash)?;
 
@@ -701,15 +697,15 @@ where
         let encoded = self.encode_node(self.root.clone());
         let root_hash = if encoded.len() < H::LENGTH {
             let hash = self.hasher.digest(&encoded);
-            self.cache.borrow_mut().insert(hash.clone(), encoded);
+            self.cache.insert(hash.clone(), encoded);
             hash
         } else {
             encoded
         };
 
-        let mut keys = Vec::with_capacity(self.cache.borrow().len());
-        let mut values = Vec::with_capacity(self.cache.borrow().len());
-        for (k, v) in self.cache.borrow_mut().drain() {
+        let mut keys = Vec::with_capacity(self.cache.len());
+        let mut values = Vec::with_capacity(self.cache.len());
+        for (k, v) in self.cache.drain() {
             keys.push(k.to_vec());
             values.push(v);
         }
@@ -720,9 +716,8 @@ where
 
         let removed_keys: Vec<Vec<u8>> = self
             .passing_keys
-            .borrow()
             .iter()
-            .filter(|h| !self.gen_keys.borrow().contains(*h))
+            .filter(|h| !self.gen_keys.contains(*h))
             .map(|h| h.to_vec())
             .collect();
 
@@ -731,13 +726,13 @@ where
             .map_err(|e| TrieError::DB(e.to_string()))?;
 
         self.root_hash = root_hash.to_vec();
-        self.gen_keys.borrow_mut().clear();
-        self.passing_keys.borrow_mut().clear();
+        self.gen_keys.clear();
+        self.passing_keys.clear();
         self.root = self.recover_from_db(&root_hash)?;
         Ok(root_hash)
     }
 
-    fn encode_node(&self, n: Node) -> Vec<u8> {
+    fn encode_node(&mut self, n: Node) -> Vec<u8> {
         // Returns the hash value directly to avoid double counting.
         if let Node::Hash(hash_node) = n {
             return hash_node.borrow().hash.clone();
@@ -750,14 +745,14 @@ where
             data
         } else {
             let hash = self.hasher.digest(&data);
-            self.cache.borrow_mut().insert(hash.clone(), data);
+            self.cache.insert(hash.clone(), data);
 
-            self.gen_keys.borrow_mut().insert(hash.clone());
+            self.gen_keys.insert(hash.clone());
             hash
         }
     }
 
-    fn encode_raw(&self, n: Node) -> Vec<u8> {
+    fn encode_raw(&mut self, n: Node) -> Vec<u8> {
         match n {
             Node::Empty => rlp::NULL_RLP.to_vec(),
             Node::Leaf(leaf) => {
@@ -859,7 +854,7 @@ where
         }
     }
 
-    fn cache_node(&self, n: Node) -> TrieResult<Vec<u8>> {
+    fn cache_node(&mut self, n: Node) -> TrieResult<Vec<u8>> {
         match n {
             Node::Empty => Ok(rlp::NULL_RLP.to_vec()),
             Node::Leaf(leaf) => {
@@ -907,7 +902,7 @@ where
                 let hash = hash_node.borrow().hash.clone();
                 let next_node = self.recover_from_db(&hash)?;
                 let data = self.cache_node(next_node)?;
-                self.cache.borrow_mut().insert(hash.clone(), data);
+                self.cache.insert(hash.clone(), data);
                 Ok(hash)
             }
         }
