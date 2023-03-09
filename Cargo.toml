@@ -14,7 +14,7 @@ documentation = "https://docs.rs/cita_trie"
 [dependencies]
 parking_lot = "0.12"
 rlp = "0.5"
-hasher = { version = "0.1", features = ["hash-keccak"] }
+sha3 = "0.10.6"
 
 [dev-dependencies]
 rand = "0.7"
