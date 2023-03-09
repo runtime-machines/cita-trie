@@ -49,7 +49,7 @@ pub trait Trie<D: DB> {
     ) -> TrieResult<Option<Vec<u8>>>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PatriciaTrie<D>
 where
     D: DB + Clone,
