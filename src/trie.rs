@@ -2,7 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::mem;
-use std::rc::Rc;
+use std::ops::Deref;
+use std::ptr::NonNull;
 
 use rlp::{Prototype, Rlp, RlpStream};
 use sha3::Digest;
@@ -10,7 +11,7 @@ use sha3::Digest;
 use crate::db::{MemoryDB, DB};
 use crate::errors::TrieError;
 use crate::nibbles::{NibbleSlice, NibbleVec};
-use crate::node::{empty_children, BranchNode, Node};
+use crate::node::{empty_children, BranchNode, ExtensionNode, Node};
 
 pub type TrieResult<T> = Result<T, TrieError>;
 
@@ -63,6 +64,83 @@ where
     cache: RefCell<HashMap<Vec<u8>, Vec<u8>>>,
     passing_keys: HashSet<[u8; 32]>,
     gen_keys: RefCell<HashSet<[u8; 32]>>,
+}
+
+impl<D: DB + Clone> Drop for PatriciaTrie<D> {
+    fn drop(&mut self) {
+        let node = mem::replace(&mut self.root, Node::Empty);
+        self.drop_inner(node)
+    }
+}
+
+impl<D: DB + Clone> PatriciaTrie<D> {
+    fn drop_inner(&mut self, node: Node) {
+        match node {
+            Node::Empty => {}
+            Node::Leaf(mut leaf) => {
+                // eprintln!("leaf = {:#?}", leaf);
+                let leaf = unsafe { Box::from_raw(leaf.as_mut()) };
+            }
+            Node::Extension(mut ext) => {
+                // eprintln!("ext = {:#?}", ext);
+                let ext_owned = unsafe { Box::from_raw(ext.as_mut()) };
+                self.drop_inner(ext_owned.node);
+            }
+            Node::Branch(mut branch) => {
+                // eprintln!("branch = {:#?}", branch);
+                let branch_owned = unsafe { Box::from_raw(branch.as_mut()) };
+                for node in branch_owned.children {
+                    // eprintln!("node = {:#?}", node);
+                    self.drop_inner(node);
+                }
+            }
+            Node::Hash(mut hash_node) => unsafe {
+                let hash_node_mut = hash_node.as_mut();
+                // let nnn = self.recover_from_db(&hash_node_mut.hash).unwrap();
+                // self.drop_inner(nnn);
+                // eprintln!("hash_node = {:02x?}", hash_node_mut.hash);
+                let _ = Box::from_raw(hash_node_mut);
+            },
+        }
+    }
+
+    // fn _print(&self, node: Node) {
+    //     let mut buf = Vec::new();
+    //
+    // }
+
+    // fn print(&self, node: Node, buf: &mut Vec<String>) {
+    //     unsafe {
+    //         match node {
+    //             Node::Empty => {
+    //                 return;
+    //             }
+    //             Node::Leaf(leaf) => {
+    //                 format!("{:?}", leaf.as_ref())
+    //             }
+    //             Node::Extension(mut ext) => {
+    //                 self.print()
+    //                 let ext_owned = unsafe { Box::from_raw(ext.as_mut()) };
+    //                 self.drop_inner(ext_owned.node);
+    //             }
+    //             Node::Branch(mut branch) => {
+    //                 eprintln!("branch = {:#?}", branch);
+    //                 let branch_owned = unsafe { Box::from_raw(branch.as_mut()) };
+    //                 for node in branch_owned.children {
+    //                     eprintln!("node = {:#?}", node);
+    //                     self.drop_inner(node);
+    //                 }
+    //             }
+    //             Node::Hash(mut hash_node) => unsafe {
+    //                 let hash_node_mut = hash_node.as_mut();
+    //                 // let nnn = self.recover_from_db(&hash_node_mut.hash).unwrap();
+    //                 // self.drop_inner(nnn);
+    //                 eprintln!("hash_node = {:02x?}", hash_node_mut.hash);
+    //                 let _ = Box::from_raw(hash_node_mut);
+    //             },
+    //         }
+    //     }
+    // }
 }
 
 #[derive(Clone, Debug)]
@@ -128,12 +206,14 @@ where
                         match *node {
                             Node::Leaf(ref leaf) => {
                                 let cur_len = self.nibble.len();
-                                self.nibble.truncate(cur_len - leaf.borrow().key.len());
+                                self.nibble
+                                    .truncate(cur_len - unsafe { leaf.as_ref() }.key.len());
                             }
 
                             Node::Extension(ref ext) => {
                                 let cur_len = self.nibble.len();
-                                self.nibble.truncate(cur_len - ext.borrow().prefix.len());
+                                self.nibble
+                                    .truncate(cur_len - unsafe { ext.as_ref() }.prefix.len());
                             }
 
                             Node::Branch(_) => {
@@ -145,17 +225,22 @@ where
                     }
 
                     (TraceStatus::Doing, Node::Extension(ref ext)) => {
-                        self.nibble.extend_from_slice(&ext.borrow().prefix);
-                        self.nodes.push((ext.borrow().node.clone()).into());
+                        self.nibble
+                            .extend_from_slice(&unsafe { ext.as_ref() }.prefix);
+                        self.nodes
+                            .push((unsafe { ext.as_ref() }.node.clone()).into());
                     }
 
                     (TraceStatus::Doing, Node::Leaf(ref leaf)) => {
-                        self.nibble.extend_from_slice(&leaf.borrow().key);
-                        return Some((self.nibble.encode_raw().0, leaf.borrow().value.clone()));
+                        self.nibble.extend_from_slice(&unsafe { leaf.as_ref() }.key);
+                        return Some((
+                            self.nibble.encode_raw().0,
+                            unsafe { leaf.as_ref() }.value.clone(),
+                        ));
                     }
 
                     (TraceStatus::Doing, Node::Branch(ref branch)) => {
-                        let value = branch.borrow().value.clone();
+                        let value = unsafe { branch.as_ref() }.value.clone();
                         if let Some(data) = value {
                             return Some((self.nibble.encode_raw().0, data));
                         } else {
@@ -164,7 +249,10 @@ where
                     }
 
                     (TraceStatus::Doing, Node::Hash(ref hash_node)) => {
-                        if let Ok(n) = self.trie.recover_from_db(&hash_node.borrow().hash.clone()) {
+                        if let Ok(n) = self
+                            .trie
+                            .recover_from_db(&unsafe { hash_node.as_ref() }.hash.clone())
+                        {
                             self.nodes.pop();
                             self.nodes.push(n.into());
                         } else {
@@ -181,7 +269,7 @@ where
                             self.nibble.push(i);
                         }
                         self.nodes
-                            .push((branch.borrow().children[i as usize].clone()).into());
+                            .push((unsafe { branch.as_ref() }.children[i as usize].clone()).into());
                     }
 
                     (_, Node::Empty) => {
@@ -375,39 +463,44 @@ where
         match n {
             Node::Empty => Ok(None),
             Node::Leaf(leaf) => {
-                let borrow_leaf = leaf.borrow();
+                let leaf_ref = unsafe { leaf.as_ref() };
 
-                if &*borrow_leaf.key == partial {
-                    Ok(Some(borrow_leaf.value.clone()))
+                if &*leaf_ref.key == partial {
+                    Ok(Some(leaf_ref.value.clone()))
                 } else {
                     Ok(None)
                 }
             }
             Node::Branch(branch) => {
-                let borrow_branch = branch.borrow();
+                let branch_ref = unsafe { branch.as_ref() };
 
                 if partial.is_empty() || partial.at(0) == 16 {
-                    Ok(borrow_branch.value.clone())
+                    Ok(branch_ref.value.clone())
                 } else {
                     let index = partial.at(0);
-                    self.get_at(borrow_branch.children[index].clone(), partial.offset(1))
+                    self.get_at(branch_ref.children[index].clone(), partial.offset(1))
                 }
             }
             Node::Extension(extension) => {
-                let extension = extension.borrow();
+                let extension_ref = unsafe { extension.as_ref() };
 
-                let prefix = &extension.prefix;
+                let prefix = &extension_ref.prefix;
                 let match_len = partial.common_prefix(prefix);
                 if match_len == prefix.len() {
-                    self.get_at(extension.node.clone(), partial.offset(match_len))
+                    self.get_at(extension_ref.node.clone(), partial.offset(match_len))
                 } else {
                     Ok(None)
                 }
             }
-            Node::Hash(hash_node) => {
-                let borrow_hash_node = hash_node.borrow();
-                let n = self.recover_from_db(&borrow_hash_node.hash)?;
-                self.get_at(n, partial)
+            Node::Hash(mut hash_node) => {
+                // Construct a new node from database and get a value from it
+                let hash_node_ref = unsafe { hash_node.as_ref() };
+                eprintln!("LLLLLLLLLLLLLLLLLLLLLLLL = {:02x?}", hash_node_ref.hash);
+                // todo(arsenron): can we cache it?
+                let trie = PatriciaTrie::from(self.db.clone(), hash_node_ref.hash.as_slice())
+                    .unwrap();
+                trie
+                    .get_at(trie.root.clone(), partial)
             }
         }
     }
@@ -415,95 +508,106 @@ where
     fn insert_at(&mut self, n: Node, partial: &NibbleSlice, value: Vec<u8>) -> TrieResult<Node> {
         match n {
             Node::Empty => Ok(Node::from_leaf(partial.to_owned(), value)),
-            Node::Leaf(leaf) => {
-                let mut borrow_leaf = leaf.borrow_mut();
+            Node::Leaf(mut leaf) => {
+                let mut leaf_mut = unsafe { leaf.as_mut() };
 
-                let old_partial = &borrow_leaf.key;
+                let old_partial = &leaf_mut.key;
                 let match_index = partial.common_prefix(old_partial);
                 if match_index == old_partial.len() {
                     // replace leaf value
-                    borrow_leaf.value = value;
-                    return Ok(Node::Leaf(leaf.clone()));
+                    leaf_mut.value = value;
+                    return Ok(Node::Leaf(leaf));
                 }
-
                 let mut branch = BranchNode {
                     children: empty_children(),
                     value: None,
                 };
 
+                let leaf_owned = unsafe { Box::from_raw(leaf_mut) };
+                let old_partial = &leaf_owned.key;
+                // todo(arsenron): Remove unnecessary allocation, i.e. mutate previous one
                 let n = Node::from_leaf(
                     old_partial.offset(match_index + 1).to_owned(),
-                    borrow_leaf.value.clone(),
+                    leaf_owned.value,
                 );
                 branch.insert(old_partial.at(match_index), n);
 
                 let n = Node::from_leaf(partial.offset(match_index + 1).to_owned(), value);
                 branch.insert(partial.at(match_index), n);
 
+                let branch = Node::Branch(NonNull::new(Box::leak(Box::new(branch))).unwrap());
                 if match_index == 0 {
-                    return Ok(Node::Branch(Rc::new(RefCell::new(branch))));
+                    // no common prefix
+                    Ok(branch)
+                } else {
+                    // include a common prefix
+                    let common_prefix = partial.slice(0, match_index).to_owned();
+                    Ok(Node::from_extension(common_prefix, branch))
                 }
-
-                // if include a common prefix
-                Ok(Node::from_extension(
-                    partial.slice(0, match_index).to_owned(),
-                    Node::Branch(Rc::new(RefCell::new(branch))),
-                ))
             }
-            Node::Branch(branch) => {
-                let mut borrow_branch = branch.borrow_mut();
+            Node::Branch(mut branch) => {
+                eprintln!("BRANCH!!!!!!!!!!!!!!!");
+                let mut branch_mut = unsafe { branch.as_mut() };
 
                 if partial.at(0) == 0x10 {
-                    borrow_branch.value = Some(value);
-                    return Ok(Node::Branch(branch.clone()));
+                    branch_mut.value = Some(value);
+                    return Ok(Node::Branch(branch));
                 }
 
-                let child = borrow_branch.children[partial.at(0)].clone();
+                let child = branch_mut.children[partial.at(0)].clone();
                 let new_child = self.insert_at(child, partial.offset(1), value)?;
-                borrow_branch.children[partial.at(0)] = new_child;
-                Ok(Node::Branch(branch.clone()))
+                branch_mut.children[partial.at(0)] = new_child;
+                Ok(Node::Branch(branch))
             }
-            Node::Extension(ext) => {
-                let mut borrow_ext = ext.borrow_mut();
+            Node::Extension(mut ext) => {
+                eprintln!("EXT!!!!!!!!!!!!!!!");
+                let mut ext_mut = unsafe { ext.as_mut() };
 
-                let prefix = &borrow_ext.prefix;
-                let sub_node = borrow_ext.node.clone();
-                let match_index = partial.common_prefix(prefix);
+                let match_index = partial.common_prefix(&ext_mut.prefix);
 
                 if match_index == 0 {
+                    let ext_owned = unsafe { Box::from_raw(ext.as_mut()) };
                     let mut branch = BranchNode {
                         children: empty_children(),
                         value: None,
                     };
                     branch.insert(
-                        prefix.at(0),
-                        if prefix.len() == 1 {
-                            sub_node
+                        ext_owned.prefix.at(0),
+                        if ext_owned.prefix.len() == 1 {
+                            ext_owned.node
                         } else {
-                            Node::from_extension(prefix.offset(1).to_owned(), sub_node)
+                            Node::from_extension(
+                                ext_owned.prefix.offset(1).to_owned(),
+                                ext_owned.node,
+                            )
                         },
                     );
-                    let node = Node::Branch(Rc::new(RefCell::new(branch)));
+                    let branch = Box::leak(Box::new(branch));
+                    let node = Node::Branch(NonNull::new(branch).unwrap());
 
                     return self.insert_at(node, partial, value);
                 }
 
+                let sub_node = ext_mut.node.clone();
+                let prefix = ext_mut.prefix.clone();
+
                 if match_index == prefix.len() {
                     let new_node = self.insert_at(sub_node, partial.offset(match_index), value)?;
+                    unsafe { Box::from_raw(ext_mut) };
                     return Ok(Node::from_extension(prefix.clone(), new_node));
                 }
 
                 let new_ext = Node::from_extension(prefix.offset(match_index).to_owned(), sub_node);
                 let new_node = self.insert_at(new_ext, partial.offset(match_index), value)?;
-                borrow_ext.prefix = prefix.slice(0, match_index).to_owned();
-                borrow_ext.node = new_node;
-                Ok(Node::Extension(ext.clone()))
+                ext_mut.prefix = prefix.slice(0, match_index).to_owned();
+                ext_mut.node = new_node;
+                Ok(Node::Extension(ext))
             }
             Node::Hash(hash_node) => {
-                let borrow_hash_node = hash_node.borrow();
+                let hash_node_ref = unsafe { hash_node.as_ref() };
 
-                self.passing_keys.insert(borrow_hash_node.hash);
-                let n = self.recover_from_db(&borrow_hash_node.hash)?;
+                self.passing_keys.insert(hash_node_ref.hash);
+                let n = self.recover_from_db(&hash_node_ref.hash)?;
                 self.insert_at(n, partial, value)
             }
         }
@@ -512,53 +616,54 @@ where
     fn delete_at(&mut self, n: Node, partial: &NibbleSlice) -> TrieResult<(Node, bool)> {
         let (new_n, deleted) = match n {
             Node::Empty => Ok((Node::Empty, false)),
-            Node::Leaf(leaf) => {
-                let borrow_leaf = leaf.borrow();
+            Node::Leaf(mut leaf) => {
+                let leaf_ref = unsafe { leaf.as_ref() };
 
-                if &*borrow_leaf.key == partial {
+                if &*leaf_ref.key == partial {
+                    unsafe { Box::from_raw(leaf.as_mut()) };
                     return Ok((Node::Empty, true));
                 }
-                Ok((Node::Leaf(leaf.clone()), false))
+                Ok((Node::Leaf(leaf), false))
             }
-            Node::Branch(branch) => {
-                let mut borrow_branch = branch.borrow_mut();
-
-                if partial.at(0) == 0x10 {
-                    borrow_branch.value = None;
-                    return Ok((Node::Branch(branch.clone()), true));
-                }
+            Node::Branch(mut branch) => {
+                let mut branch_ref = unsafe { branch.as_mut() };
 
                 let index = partial.at(0);
-                let node = borrow_branch.children[index].clone();
+                if index == 0x10 {
+                    branch_ref.value = None;
+                    return Ok((Node::Branch(branch), true));
+                }
+
+                let node = branch_ref.children[index].clone();
 
                 let (new_n, deleted) = self.delete_at(node, partial.offset(1))?;
                 if deleted {
-                    borrow_branch.children[index] = new_n;
+                    branch_ref.children[index] = new_n;
                 }
 
-                Ok((Node::Branch(branch.clone()), deleted))
+                Ok((Node::Branch(branch), deleted))
             }
-            Node::Extension(ext) => {
-                let mut borrow_ext = ext.borrow_mut();
+            Node::Extension(mut ext) => {
+                let mut ext_ref = unsafe { ext.as_mut() };
 
-                let prefix = &borrow_ext.prefix;
+                let prefix = &ext_ref.prefix;
                 let match_len = partial.common_prefix(prefix);
 
                 if match_len == prefix.len() {
                     let (new_n, deleted) =
-                        self.delete_at(borrow_ext.node.clone(), partial.offset(match_len))?;
+                        self.delete_at(ext_ref.node.clone(), partial.offset(match_len))?;
 
                     if deleted {
-                        borrow_ext.node = new_n;
+                        ext_ref.node = new_n;
                     }
 
-                    Ok((Node::Extension(ext.clone()), deleted))
+                    Ok((Node::Extension(ext), deleted))
                 } else {
-                    Ok((Node::Extension(ext.clone()), false))
+                    Ok((Node::Extension(ext), false))
                 }
             }
             Node::Hash(hash_node) => {
-                let hash = hash_node.borrow().hash;
+                let hash = unsafe { hash_node.as_ref() }.hash;
                 self.passing_keys.insert(hash);
 
                 let n = self.recover_from_db(&hash)?;
@@ -575,11 +680,11 @@ where
 
     fn degenerate(&mut self, n: Node) -> TrieResult<Node> {
         match n {
-            Node::Branch(branch) => {
-                let borrow_branch = branch.borrow();
+            Node::Branch(mut branch) => {
+                let branch_ref = unsafe { branch.as_ref() };
                 let mut empty = true;
                 let mut ext_to = None;
-                for (index, node) in borrow_branch.children.iter().enumerate() {
+                for (index, node) in branch_ref.children.iter().enumerate() {
                     match node {
                         Node::Empty => continue,
                         _ => {
@@ -596,54 +701,60 @@ where
                     }
                 }
 
-                match (empty, ext_to, borrow_branch.value.as_ref()) {
+                match (empty, ext_to, branch_ref.value.as_ref()) {
                     // if only a value node, transmute to leaf.
                     (true, None, Some(_)) => {
                         let key = NibbleVec::from_raw(vec![], true);
-                        let value = borrow_branch.value.clone().unwrap();
+                        let value = branch_ref.value.clone().unwrap();
+                        unsafe { Box::from_raw(branch.as_mut()) };
                         Ok(Node::from_leaf(key, value))
                     }
                     (true, Some(_), _) => unreachable!(),
                     // if only one node. make an extension.
                     (false, Some(used_index), None) => {
-                        let n = borrow_branch.children[used_index].clone();
+                        let n = branch_ref.children[used_index].clone();
 
                         let new_node =
                             Node::from_extension(NibbleVec::from_hex(vec![used_index as u8]), n);
+                        unsafe { Box::from_raw(branch.as_mut()) };
                         self.degenerate(new_node)
                     }
-                    _ => Ok(Node::Branch(branch.clone())),
+                    _ => Ok(Node::Branch(branch)),
                 }
             }
-            Node::Extension(ext) => {
-                let borrow_ext = ext.borrow();
+            Node::Extension(mut ext) => {
+                let ext_ref = unsafe { ext.as_ref() };
 
-                let prefix = &borrow_ext.prefix;
-                match borrow_ext.node.clone() {
-                    Node::Extension(sub_ext) => {
-                        let borrow_sub_ext = sub_ext.borrow();
+                let prefix = &ext_ref.prefix;
+                match ext_ref.node.clone() {
+                    Node::Extension(mut sub_ext) => {
+                        let sub_ext_ref = unsafe { sub_ext.as_ref() };
 
-                        let new_prefix = prefix.join(&borrow_sub_ext.prefix);
-                        let new_n = Node::from_extension(new_prefix, borrow_sub_ext.node.clone());
+                        let new_prefix = prefix.join(&sub_ext_ref.prefix);
+                        let new_n = Node::from_extension(new_prefix, sub_ext_ref.node.clone());
+                        unsafe { Box::from_raw(sub_ext.as_mut()) };
                         self.degenerate(new_n)
                     }
-                    Node::Leaf(leaf) => {
-                        let borrow_leaf = leaf.borrow();
+                    Node::Leaf(mut leaf) => {
+                        let leaf_ref = unsafe { leaf.as_ref() };
 
-                        let new_prefix = prefix.join(&borrow_leaf.key);
-                        Ok(Node::from_leaf(new_prefix, borrow_leaf.value.clone()))
+                        let new_prefix = prefix.join(&leaf_ref.key);
+                        let value = leaf_ref.value.clone();
+                        unsafe { Box::from_raw(leaf.as_mut()) };
+                        Ok(Node::from_leaf(new_prefix, value))
                     }
                     // try again after recovering node from the db.
-                    Node::Hash(hash_node) => {
-                        let hash = hash_node.borrow().hash;
+                    Node::Hash(mut hash_node) => {
+                        let hash = unsafe { hash_node.as_ref().hash };
                         self.passing_keys.insert(hash);
 
                         let new_node = self.recover_from_db(&hash)?;
 
-                        let n = Node::from_extension(borrow_ext.prefix.clone(), new_node);
+                        let n = Node::from_extension(ext_ref.prefix.clone(), new_node);
+                        unsafe { Box::from_raw(hash_node.as_mut()) };
                         self.degenerate(n)
                     }
-                    _ => Ok(Node::Extension(ext.clone())),
+                    _ => Ok(Node::Extension(ext)),
                 }
             }
             _ => Ok(n),
@@ -660,29 +771,29 @@ where
         match n {
             Node::Empty | Node::Leaf(_) => Ok(vec![]),
             Node::Branch(branch) => {
-                let borrow_branch = branch.borrow();
+                let branch_ref = unsafe { branch.as_ref() };
 
                 if partial.is_empty() || partial.at(0) == 16 {
                     Ok(vec![])
                 } else {
-                    let node = borrow_branch.children[partial.at(0)].clone();
+                    let node = branch_ref.children[partial.at(0)].clone();
                     self.get_path_at(node, partial.offset(1))
                 }
             }
             Node::Extension(ext) => {
-                let borrow_ext = ext.borrow();
+                let ext_ref = unsafe { ext.as_ref() };
 
-                let prefix = &borrow_ext.prefix;
+                let prefix = &ext_ref.prefix;
                 let match_len = partial.common_prefix(prefix);
 
                 if match_len == prefix.len() {
-                    self.get_path_at(borrow_ext.node.clone(), partial.offset(match_len))
+                    self.get_path_at(ext_ref.node.clone(), partial.offset(match_len))
                 } else {
                     Ok(vec![])
                 }
             }
             Node::Hash(hash_node) => {
-                let n = self.recover_from_db(&hash_node.borrow().hash.clone())?;
+                let n = self.recover_from_db(&unsafe { hash_node.as_ref() }.hash.clone())?;
                 let mut rest = self.get_path_at(n.clone(), partial)?;
                 rest.push(n);
                 Ok(rest)
@@ -718,6 +829,8 @@ where
         self.root_hash = root_hash.to_vec();
         self.gen_keys.borrow_mut().clear();
         self.passing_keys.clear();
+        let prev_root = mem::replace(&mut self.root, Node::Empty);
+        self.drop_inner(prev_root);
         self.root = self.recover_from_db(&root_hash)?;
         Ok(root_hash)
     }
@@ -725,10 +838,10 @@ where
     fn encode_node(&self, n: Node) -> Vec<u8> {
         // Returns the hash value directly to avoid double counting.
         if let Node::Hash(hash_node) = n {
-            return hash_node.borrow().hash.to_vec();
+            return unsafe { hash_node.as_ref() }.hash.to_vec();
         }
 
-        let data = self.encode_raw(n.clone());
+        let data = self.encode_raw(n);
         // Nodes smaller than 32 bytes are stored inside their parent,
         // Nodes equal to 32 bytes are returned directly
         if data.len() < sha3::Keccak256::output_size() {
@@ -746,19 +859,19 @@ where
         match n {
             Node::Empty => rlp::NULL_RLP.to_vec(),
             Node::Leaf(leaf) => {
-                let borrow_leaf = leaf.borrow();
+                let leaf_ref = unsafe { leaf.as_ref() };
 
                 let mut stream = RlpStream::new_list(2);
-                stream.append(&borrow_leaf.key.encode_compact());
-                stream.append(&borrow_leaf.value);
+                stream.append(&leaf_ref.key.encode_compact());
+                stream.append(&leaf_ref.value);
                 stream.out().to_vec()
             }
             Node::Branch(branch) => {
-                let borrow_branch = branch.borrow();
+                let branch_ref = unsafe { branch.as_ref() };
 
                 let mut stream = RlpStream::new_list(17);
                 for i in 0..16 {
-                    let n = borrow_branch.children[i].clone();
+                    let n = branch_ref.children[i].clone();
                     let data = self.encode_node(n);
                     if data.len() == sha3::Keccak256::output_size() {
                         stream.append(&data);
@@ -767,18 +880,18 @@ where
                     }
                 }
 
-                match &borrow_branch.value {
+                match &branch_ref.value {
                     Some(v) => stream.append(v),
                     None => stream.append_empty_data(),
                 };
                 stream.out().to_vec()
             }
             Node::Extension(ext) => {
-                let borrow_ext = ext.borrow();
+                let ext_ref = unsafe { ext.as_ref() };
 
                 let mut stream = RlpStream::new_list(2);
-                stream.append(&borrow_ext.prefix.encode_compact());
-                let data = self.encode_node(borrow_ext.node.clone());
+                stream.append(&ext_ref.prefix.encode_compact());
+                let data = self.encode_node(ext_ref.node.clone());
                 if data.len() == sha3::Keccak256::output_size() {
                     stream.append(&data);
                 } else {
@@ -829,6 +942,7 @@ where
             }
             _ => {
                 if r.is_data() && r.size() == sha3::Keccak256::output_size() {
+                    eprintln!("PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP");
                     Ok(Node::from_hash(r.data()?.try_into().unwrap()))
                 } else {
                     Err(TrieError::InvalidData)
@@ -844,23 +958,34 @@ where
         }
     }
 
+    // fn recover_from_db_with_insert(&self, key: &[u8], root: Node, partial: &NibbleSlice) -> TrieResult<Node> {
+    //     match self.db.get(key).map_err(|e| TrieError::DB(e.to_string()))? {
+    //         Some(value) => {
+    //             let decoded = self.decode_node(&value)?;
+    //             self.insert_at(decoded, partial, )
+    //             Ok(self.decode_node(&value)?)
+    //         },
+    //         None => Ok(Node::Empty),
+    //     }
+    // }
+
     fn cache_node(&self, n: Node) -> TrieResult<Vec<u8>> {
         match n {
             Node::Empty => Ok(rlp::NULL_RLP.to_vec()),
             Node::Leaf(leaf) => {
-                let borrow_leaf = leaf.borrow();
+                let leaf_ref = unsafe { leaf.as_ref() };
 
                 let mut stream = RlpStream::new_list(2);
-                stream.append(&borrow_leaf.key.encode_compact());
-                stream.append(&borrow_leaf.value);
+                stream.append(&leaf_ref.key.encode_compact());
+                stream.append(&leaf_ref.value);
                 Ok(stream.out().to_vec())
             }
             Node::Branch(branch) => {
-                let borrow_branch = branch.borrow();
+                let branch_ref = unsafe { branch.as_ref() };
 
                 let mut stream = RlpStream::new_list(17);
                 for i in 0..16 {
-                    let n = borrow_branch.children[i].clone();
+                    let n = branch_ref.children[i].clone();
                     let data = self.cache_node(n)?;
                     if data.len() == sha3::Keccak256::output_size() {
                         stream.append(&data);
@@ -869,18 +994,18 @@ where
                     }
                 }
 
-                match &borrow_branch.value {
+                match &branch_ref.value {
                     Some(v) => stream.append(v),
                     None => stream.append_empty_data(),
                 };
                 Ok(stream.out().to_vec())
             }
             Node::Extension(ext) => {
-                let borrow_ext = ext.borrow();
+                let ext_ref = unsafe { ext.as_ref() };
 
                 let mut stream = RlpStream::new_list(2);
-                stream.append(&borrow_ext.prefix.encode_compact());
-                let data = self.cache_node(borrow_ext.node.clone())?;
+                stream.append(&ext_ref.prefix.encode_compact());
+                let data = self.cache_node(ext_ref.node.clone())?;
                 if data.len() == sha3::Keccak256::output_size() {
                     stream.append(&data);
                 } else {
@@ -889,7 +1014,7 @@ where
                 Ok(stream.out().to_vec())
             }
             Node::Hash(hash_node) => {
-                let hash = hash_node.borrow().hash;
+                let hash = unsafe { hash_node.as_ref() }.hash;
                 let next_node = self.recover_from_db(&hash)?;
                 let data = self.cache_node(next_node)?;
                 self.cache.borrow_mut().insert(hash.to_vec(), data);
@@ -915,6 +1040,8 @@ mod tests {
         let memdb = MemoryDB::new(true);
         let mut trie = PatriciaTrie::new(memdb);
         trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
+        trie.insert(b"tswq".to_vec(), b"test2".to_vec()).unwrap();
+        eprintln!("trie = {:#?}", trie.root);
     }
 
     #[test]

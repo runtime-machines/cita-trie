@@ -547,6 +547,7 @@ mod trie_tests {
     // - https://github.com/ethereum/go-ethereum/blob/master/trie/proof_test.go
     // - https://github.com/ethereum/py-trie/blob/master/tests/test_proof.py
     #[test]
+    // #[ignore]
     fn test_proof_basic() {
         let memdb = MemoryDB::new(true);
         let mut trie = PatriciaTrie::new(memdb.clone());

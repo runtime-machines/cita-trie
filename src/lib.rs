@@ -4,7 +4,7 @@
 //! ```rust
 //! use std::sync::Arc;
 //!
-//! use hasher::{Hasher, HasherKeccak}; // https://crates.io/crates/hasher
+//! // use hasher::{Hasher, HasherKeccak}; // https://crates.io/crates/hasher
 //!
 //! use cita_trie::MemoryDB;
 //! use cita_trie::{PatriciaTrie, Trie};

@@ -26,8 +26,15 @@ impl NibbleSlice {
             .count()
     }
 
+    /// Takes a slice from `index` to the end.
+    ///
+    /// `Panics` if `index` > slice length
     pub fn offset(&self, index: usize) -> &Self {
         self.slice(index, self.len())
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
     }
 
     pub fn slice(&self, start: usize, end: usize) -> &Self {
@@ -108,7 +115,7 @@ impl NibbleVec {
     }
 
     pub fn is_leaf(&self) -> bool {
-        self.hex_data[self.hex_data.len() - 1] == 16
+        *self.hex_data.last().unwrap() == 16
     }
 
     pub fn encode_compact(&self) -> Vec<u8> {
