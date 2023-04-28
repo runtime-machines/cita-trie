@@ -69,29 +69,25 @@ where
 impl<D: DB + Clone> Drop for PatriciaTrie<D> {
     fn drop(&mut self) {
         let node = mem::replace(&mut self.root, Node::Empty);
-        self.drop_inner(node)
+        unsafe { self.drop_inner(node) }
     }
 }
 
 impl<D: DB + Clone> PatriciaTrie<D> {
     /// Recursively drops all the allocated nodes
-    fn drop_inner(&mut self, node: Node) {
+    unsafe fn drop_inner(&mut self, node: Node) {
         match node {
             Node::Empty => {}
             Node::Leaf(mut leaf) => {
-                // eprintln!("leaf = {:#?}", leaf);
-                let leaf = unsafe { Box::from_raw(leaf.as_mut()) };
+                unsafe { Box::from_raw(leaf.as_mut()) };
             }
             Node::Extension(mut ext) => {
-                // eprintln!("ext = {:#?}", ext);
                 let ext_owned = unsafe { Box::from_raw(ext.as_mut()) };
                 self.drop_inner(ext_owned.node);
             }
             Node::Branch(mut branch) => {
-                // eprintln!("branch = {:#?}", branch);
                 let branch_owned = unsafe { Box::from_raw(branch.as_mut()) };
                 for node in branch_owned.children {
-                    // eprintln!("node = {:#?}", node);
                     self.drop_inner(node);
                 }
             }
@@ -101,44 +97,6 @@ impl<D: DB + Clone> PatriciaTrie<D> {
             },
         }
     }
-
-    // fn _print(&self, node: Node) {
-    //     let mut buf = Vec::new();
-    //
-    // }
-
-    // fn print(&self, node: Node, buf: &mut Vec<String>) {
-    //     unsafe {
-    //         match node {
-    //             Node::Empty => {
-    //                 return;
-    //             }
-    //             Node::Leaf(leaf) => {
-    //                 format!("{:?}", leaf.as_ref())
-    //             }
-    //             Node::Extension(mut ext) => {
-    //                 self.print()
-    //                 let ext_owned = unsafe { Box::from_raw(ext.as_mut()) };
-    //                 self.drop_inner(ext_owned.node);
-    //             }
-    //             Node::Branch(mut branch) => {
-    //                 eprintln!("branch = {:#?}", branch);
-    //                 let branch_owned = unsafe { Box::from_raw(branch.as_mut()) };
-    //                 for node in branch_owned.children {
-    //                     eprintln!("node = {:#?}", node);
-    //                     self.drop_inner(node);
-    //                 }
-    //             }
-    //             Node::Hash(mut hash_node) => unsafe {
-    //                 let hash_node_mut = hash_node.as_mut();
-    //                 // let nnn = self.recover_from_db(&hash_node_mut.hash).unwrap();
-    //                 // self.drop_inner(nnn);
-    //                 eprintln!("hash_node = {:02x?}", hash_node_mut.hash);
-    //                 let _ = Box::from_raw(hash_node_mut);
-    //             },
-    //         }
-    //     }
-    // }
 }
 
 #[derive(Clone, Debug)]
@@ -499,10 +457,9 @@ where
                 // todo(arsenron): can we cache it? We can do something like iter all the trie and insert
                 //  all the values in the original trie.
                 //  Cached Arc<Mutex> is an option too.
-                let trie = PatriciaTrie::from(self.db.clone(), hash_node_ref.hash.as_slice())
-                    .unwrap();
-                trie
-                    .get_at(trie.root.clone(), partial)
+                let trie =
+                    PatriciaTrie::from(self.db.clone(), hash_node_ref.hash.as_slice()).unwrap();
+                trie.get_at(trie.root.clone(), partial)
             }
         }
     }
@@ -550,7 +507,7 @@ where
             Node::Branch(mut branch) => {
                 let mut branch_mut = unsafe { branch.as_mut() };
 
-                if partial.at(0) == 0x10 {
+                if partial.at(0) == 16 {
                     branch_mut.value = Some(value);
                     return Ok(Node::Branch(branch));
                 }
@@ -605,10 +562,10 @@ where
             }
             Node::Hash(mut hash_node) => {
                 // Consume hash node and insert in-place an expanded node
-                let hash_node_ref = unsafe { Box::from_raw(hash_node.as_mut()) };
+                let hash_node_owned = unsafe { Box::from_raw(hash_node.as_mut()) };
 
-                self.passing_keys.insert(hash_node_ref.hash);
-                let n = self.recover_from_db(&hash_node_ref.hash)?;
+                self.passing_keys.insert(hash_node_owned.hash);
+                let n = self.recover_from_db(&hash_node_owned.hash)?;
                 self.insert_at(n, partial, value)
             }
         }
@@ -627,19 +584,19 @@ where
                 Ok((Node::Leaf(leaf), false))
             }
             Node::Branch(mut branch) => {
-                let mut branch_ref = unsafe { branch.as_mut() };
+                let mut branch_mut = unsafe { branch.as_mut() };
 
                 let index = partial.at(0);
-                if index == 0x10 {
-                    branch_ref.value = None;
+                if index == 16 {
+                    branch_mut.value = None;
                     return Ok((Node::Branch(branch), true));
                 }
 
-                let node = branch_ref.children[index].clone();
+                let node = branch_mut.children[index].clone();
 
                 let (new_n, deleted) = self.delete_at(node, partial.offset(1))?;
                 if deleted {
-                    branch_ref.children[index] = new_n;
+                    branch_mut.children[index] = new_n;
                 }
 
                 Ok((Node::Branch(branch), deleted))
@@ -663,11 +620,11 @@ where
                     Ok((Node::Extension(ext), false))
                 }
             }
-            Node::Hash(hash_node) => {
-                let hash = unsafe { hash_node.as_ref() }.hash;
-                self.passing_keys.insert(hash);
-
-                let n = self.recover_from_db(&hash)?;
+            Node::Hash(mut hash_node) => {
+                // Consume hash node and insert in-place an expanded node
+                let hash_node_owned = unsafe { Box::from_raw(hash_node.as_mut()) };
+                self.passing_keys.insert(hash_node_owned.hash);
+                let n = self.recover_from_db(&hash_node_owned.hash)?;
                 self.delete_at(n, partial)
             }
         }?;
@@ -831,7 +788,7 @@ where
         self.gen_keys.borrow_mut().clear();
         self.passing_keys.clear();
         let prev_root = mem::replace(&mut self.root, Node::Empty);
-        self.drop_inner(prev_root);
+        unsafe { self.drop_inner(prev_root) };
         self.root = self.recover_from_db(&root_hash)?;
         Ok(root_hash)
     }
@@ -1149,11 +1106,14 @@ mod tests {
             trie.insert(b"test23".to_vec(), b"test".to_vec()).unwrap();
             trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
             trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
-            trie.commit().unwrap()
+            let s = trie.commit().unwrap();
+            // eprintln!("trie.root = {:#?}", trie.root);
+            s
         };
 
         let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
-        let removed = trie.remove(b"test44").unwrap();
+        let removed = trie.remove(b"test").unwrap();
+        // eprintln!("trie.root = {:#?}", trie.root);
         // assert!(removed);
         // let removed = trie.remove(b"test33").unwrap();
         // assert!(removed);

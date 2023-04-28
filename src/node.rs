@@ -24,16 +24,16 @@ impl Debug for Node {
                     write!(f, "empty")
                 }
                 Node::Leaf(leaf) => {
-                    write!(f, "{:#?}", leaf.as_ref())
+                    write!(f, "{:#02x?}", leaf.as_ref())
                 }
                 Node::Extension(ext) => {
-                    write!(f, "{:#?}", ext.as_ref())
+                    write!(f, "{:#02x?}", ext.as_ref())
                 }
                 Node::Branch(b) => {
-                    write!(f, "{:#?}", b.as_ref())
+                    write!(f, "{:#02x?}", b.as_ref())
                 }
                 Node::Hash(h) => {
-                    write!(f, "{:#?}", h.as_ref())
+                    write!(f, "{:#02x?}", h.as_ref())
                 }
             }
         }
