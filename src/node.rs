@@ -1,8 +1,9 @@
+use std::fmt::{Debug, Formatter};
 use std::ptr::NonNull;
 
 use crate::nibbles::NibbleVec;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Node {
     Empty,
     Leaf(NonNull<LeafNode>),
@@ -15,6 +16,29 @@ unsafe impl Send for Node {}
 
 unsafe impl Sync for Node {}
 
+impl Debug for Node {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        unsafe {
+            match self {
+                Node::Empty => {
+                    write!(f, "empty")
+                }
+                Node::Leaf(leaf) => {
+                    write!(f, "{:#?}", leaf.as_ref())
+                }
+                Node::Extension(ext) => {
+                    write!(f, "{:#?}", ext.as_ref())
+                }
+                Node::Branch(b) => {
+                    write!(f, "{:#?}", b.as_ref())
+                }
+                Node::Hash(h) => {
+                    write!(f, "{:#?}", h.as_ref())
+                }
+            }
+        }
+    }
+}
 
 impl Node {
     pub fn from_leaf(key: NibbleVec, value: Vec<u8>) -> Self {
@@ -52,14 +76,15 @@ pub struct BranchNode {
 }
 
 impl BranchNode {
-    pub fn insert(&mut self, i: usize, n: Node) {
+    pub(crate) fn insert(&mut self, i: usize, n: Node) {
+        debug_assert!((0usize..=16).contains(&i));
         if i == 16 {
-            match n {
-                Node::Leaf(mut leaf) => {
-                    let leaf_owned = unsafe { Box::from_raw(leaf.as_mut()) };
-                    self.value = Some(leaf_owned.value);
-                }
-                _ => panic!("The n must be leaf node"),
+            // Leaf node is substituted by branch node, so we deallocate a leaf node
+            if let Node::Leaf(mut leaf) = n {
+                let leaf_owned = unsafe { Box::from_raw(leaf.as_mut()) };
+                self.value = Some(leaf_owned.value);
+            } else {
+                panic!("The n must be leaf node")
             }
         } else {
             self.children[i] = n

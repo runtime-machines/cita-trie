@@ -33,7 +33,7 @@ impl NibbleSlice {
         self.slice(index, self.len())
     }
 
-    pub fn as_slice(&self) -> &[u8] {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
