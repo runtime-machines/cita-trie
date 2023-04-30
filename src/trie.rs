@@ -572,6 +572,7 @@ where
     }
 
     fn delete_at(&mut self, n: Node, partial: &NibbleSlice) -> TrieResult<(Node, bool)> {
+        eprintln!("partial = {:#?}", partial);
         let (new_n, deleted) = match n {
             Node::Empty => Ok((Node::Empty, false)),
             Node::Leaf(mut leaf) => {
@@ -593,6 +594,7 @@ where
                 }
 
                 let node = branch_mut.children[index].clone();
+                // eprintln!("node = {:#?}", node);
 
                 let (new_n, deleted) = self.delete_at(node, partial.offset(1))?;
                 if deleted {
@@ -605,6 +607,7 @@ where
                 let mut ext_ref = unsafe { ext.as_mut() };
 
                 let prefix = &ext_ref.prefix;
+                eprintln!("prefix = {:#?}", prefix);
                 let match_len = partial.common_prefix(prefix);
 
                 if match_len == prefix.len() {
@@ -629,55 +632,45 @@ where
             }
         }?;
 
+        // Ok((new_n, deleted))
         if deleted {
-            Ok((self.degenerate(new_n)?, deleted))
+            let degenerated = self.degenerate(new_n)?;
+            eprintln!("degenerated = {:#?}", degenerated);
+            Ok((degenerated, deleted))
         } else {
             Ok((new_n, deleted))
         }
     }
 
     fn degenerate(&mut self, n: Node) -> TrieResult<Node> {
+        eprintln!("TO DEGENERATE n = {:#?}", n);
         match n {
             Node::Branch(mut branch) => {
-                let branch_ref = unsafe { branch.as_ref() };
-                let mut empty = true;
-                let mut ext_to = None;
-                for (index, node) in branch_ref.children.iter().enumerate() {
+                let branch_mut = unsafe { branch.as_mut() };
+
+                let mut used_indexes = vec![];
+                for (index, node) in branch_mut.children.iter().enumerate() {
                     match node {
                         Node::Empty => continue,
-                        _ => {
-                            let was_empty = mem::replace(&mut empty, false);
-                            // if there's exactly one used node, store its index,
-                            // set another flag if at least one node is not mpty
-                            if ext_to.is_none() && was_empty {
-                                ext_to = Some(index);
-                            } else {
-                                ext_to = None;
-                                break;
-                            }
-                        }
+                        _ => used_indexes.push(index),
                     }
                 }
-
-                match (empty, ext_to, branch_ref.value.as_ref()) {
-                    // if only a value node, transmute to leaf.
-                    (true, None, Some(_)) => {
-                        let key = NibbleVec::from_raw(vec![], true);
-                        let value = branch_ref.value.clone().unwrap();
-                        unsafe { Box::from_raw(branch.as_mut()) };
-                        Ok(Node::from_leaf(key, value))
-                    }
-                    (true, Some(_), _) => unreachable!(),
+                // if only a value node, transmute to leaf.
+                if used_indexes.is_empty() && branch_mut.value.is_some() {
+                    let key = NibbleVec::from_raw([].to_vec(), true);
+                    let branch_owned = unsafe { Box::from_raw(branch_mut) };
+                    Ok(Node::from_leaf(key, branch_owned.value.unwrap()))
                     // if only one node. make an extension.
-                    (false, Some(used_index), None) => {
-                        let n = branch_ref.children[used_index].clone();
+                } else if used_indexes.len() == 1 && branch_mut.value.is_none() {
+                    let used_index = used_indexes[0];
+                    let n = branch_mut.children[used_index].clone();
+                    unsafe { Box::from_raw(branch_mut) };
 
-                        let new_node =
-                            Node::from_extension(NibbleVec::from_hex(vec![used_index as u8]), n);
-                        unsafe { Box::from_raw(branch.as_mut()) };
-                        self.degenerate(new_node)
-                    }
-                    _ => Ok(Node::Branch(branch)),
+                    let new_node =
+                        Node::from_extension(NibbleVec::from_hex(vec![used_index as u8]), n);
+                    self.degenerate(new_node)
+                } else {
+                    Ok(Node::Branch(branch.clone()))
                 }
             }
             Node::Extension(mut ext) => {
@@ -686,23 +679,20 @@ where
                 let prefix = &ext_ref.prefix;
                 match ext_ref.node.clone() {
                     Node::Extension(mut sub_ext) => {
-                        let sub_ext_ref = unsafe { sub_ext.as_ref() };
-
-                        let new_prefix = prefix.join(&sub_ext_ref.prefix);
-                        let new_n = Node::from_extension(new_prefix, sub_ext_ref.node.clone());
-                        unsafe { Box::from_raw(sub_ext.as_mut()) };
-                        self.degenerate(new_n)
+                        let sub_ext_mut = unsafe {sub_ext.as_mut()};
+                        sub_ext_mut.prefix = prefix.join(&sub_ext_mut.prefix);
+                        unsafe { Box::from_raw(ext.as_mut()) };
+                        self.degenerate(Node::Extension(sub_ext))
                     }
                     Node::Leaf(mut leaf) => {
-                        let leaf_ref = unsafe { leaf.as_ref() };
-
-                        let new_prefix = prefix.join(&leaf_ref.key);
-                        let value = leaf_ref.value.clone();
-                        unsafe { Box::from_raw(leaf.as_mut()) };
-                        Ok(Node::from_leaf(new_prefix, value))
+                        let leaf_mut = unsafe { leaf.as_mut() };
+                        leaf_mut.key = prefix.join(&leaf_mut.key);
+                        unsafe { Box::from_raw(ext.as_mut()) };
+                        Ok(Node::Leaf(leaf))
                     }
                     // try again after recovering node from the db.
                     Node::Hash(mut hash_node) => {
+                        // todo(arsenron): here are leaks
                         let hash = unsafe { hash_node.as_ref().hash };
                         self.passing_keys.insert(hash);
 
@@ -1031,8 +1021,12 @@ mod tests {
         let memdb = MemoryDB::new(true);
         let mut trie = PatriciaTrie::new(memdb);
         trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
-        let removed = trie.remove(b"test").unwrap();
-        assert!(removed)
+        trie.insert(b"test2".to_vec(), b"test".to_vec()).unwrap();
+        // trie.insert(b"test3".to_vec(), b"test".to_vec()).unwrap();
+        // eprintln!("trie.root = {:#?}", trie.root);
+        // eprintln!("trie.root = {:#?}", trie.root);
+        let removed = trie.remove(b"test2").unwrap();
+        // assert!(removed)
     }
 
     #[test]
@@ -1106,96 +1100,94 @@ mod tests {
             trie.insert(b"test23".to_vec(), b"test".to_vec()).unwrap();
             trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
             trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
-            let s = trie.commit().unwrap();
-            // eprintln!("trie.root = {:#?}", trie.root);
-            s
+            trie.commit().unwrap()
         };
 
         let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
         let removed = trie.remove(b"test").unwrap();
-        // eprintln!("trie.root = {:#?}", trie.root);
-        // assert!(removed);
-        // let removed = trie.remove(b"test33").unwrap();
-        // assert!(removed);
-        // let removed = trie.remove(b"test23").unwrap();
-        // assert!(removed);
+        assert!(removed);
+        let removed = trie.remove(b"test33").unwrap();
+        assert!(removed);
+        let removed = trie.remove(b"test23").unwrap();
+        assert!(removed);
+        eprintln!("{:?}", trie.get(b"test44").unwrap());
     }
-    //
-    // #[test]
-    // fn test_multiple_trie_roots() {
-    //     let k0 = ethereum_types::H256::from_low_u64_le(0);
-    //     let k1 = ethereum_types::H256::from_low_u64_le(1);
-    //     let v = ethereum_types::H256::from_low_u64_le(0x1234);
-    //
-    //     let root1 = {
-    //         let memdb = MemoryDB::new(true);
-    //         let mut trie = PatriciaTrie::new(memdb);
-    //         trie.insert(k0.as_bytes().to_vec(), v.as_bytes().to_vec())
-    //             .unwrap();
-    //         trie.root().unwrap()
-    //     };
-    //
-    //     let root2 = {
-    //         let memdb = MemoryDB::new(true);
-    //         let mut trie = PatriciaTrie::new(memdb);
-    //         trie.insert(k0.as_bytes().to_vec(), v.as_bytes().to_vec())
-    //             .unwrap();
-    //         trie.insert(k1.as_bytes().to_vec(), v.as_bytes().to_vec())
-    //             .unwrap();
-    //         trie.root().unwrap();
-    //         trie.remove(k1.as_ref()).unwrap();
-    //         trie.root().unwrap()
-    //     };
-    //
-    //     let root3 = {
-    //         let memdb = MemoryDB::new(true);
-    //         let mut trie1 = PatriciaTrie::new(memdb.clone());
-    //         trie1
-    //             .insert(k0.as_bytes().to_vec(), v.as_bytes().to_vec())
-    //             .unwrap();
-    //         trie1
-    //             .insert(k1.as_bytes().to_vec(), v.as_bytes().to_vec())
-    //             .unwrap();
-    //         trie1.root().unwrap();
-    //         let root = trie1.root().unwrap();
-    //         let mut trie2 = PatriciaTrie::from(memdb.clone(), &root).unwrap();
-    //         trie2.remove(k1.as_bytes()).unwrap();
-    //         trie2.root().unwrap()
-    //     };
-    //
-    //     assert_eq!(root1, root2);
-    //     assert_eq!(root2, root3);
-    // }
-    //
-    // #[test]
-    // fn test_delete_stale_keys_with_random_insert_and_delete() {
-    //     let memdb = MemoryDB::new(true);
-    //     let mut trie = PatriciaTrie::new(memdb);
-    //
-    //     let mut rng = rand::thread_rng();
-    //     let mut keys = vec![];
-    //     for _ in 0..100 {
-    //         let random_bytes: Vec<u8> = (0..rng.gen_range(2, 30))
-    //             .map(|_| rand::random::<u8>())
-    //             .collect();
-    //         trie.insert(random_bytes.clone(), random_bytes.clone())
-    //             .unwrap();
-    //         keys.push(random_bytes.clone());
-    //     }
-    //     trie.commit().unwrap();
-    //     let slice = &mut keys;
-    //     slice.shuffle(&mut rng);
-    //
-    //     for key in slice.iter() {
-    //         trie.remove(key).unwrap();
-    //     }
-    //     trie.commit().unwrap();
-    //
-    //     let empty_node_key = sha3::Keccak256::digest(&rlp::NULL_RLP);
-    //     let value = trie.db.get(empty_node_key.as_ref()).unwrap().unwrap();
-    //     assert_eq!(value, &rlp::NULL_RLP)
-    // }
-    //
+
+    #[test]
+    fn test_multiple_trie_roots() {
+        let k0 = ethereum_types::H256::from_low_u64_le(0);
+        let k1 = ethereum_types::H256::from_low_u64_le(1);
+        let v = ethereum_types::H256::from_low_u64_le(0x1234);
+
+        let root1 = {
+            let memdb = MemoryDB::new(true);
+            let mut trie = PatriciaTrie::new(memdb);
+            trie.insert(k0.as_bytes().to_vec(), v.as_bytes().to_vec())
+                .unwrap();
+            trie.root().unwrap()
+        };
+
+        let root2 = {
+            let memdb = MemoryDB::new(true);
+            let mut trie = PatriciaTrie::new(memdb);
+            trie.insert(k0.as_bytes().to_vec(), v.as_bytes().to_vec())
+                .unwrap();
+            trie.insert(k1.as_bytes().to_vec(), v.as_bytes().to_vec())
+                .unwrap();
+            trie.root().unwrap();
+            trie.remove(k1.as_ref()).unwrap();
+            trie.root().unwrap()
+        };
+
+        let root3 = {
+            let memdb = MemoryDB::new(true);
+            let mut trie1 = PatriciaTrie::new(memdb.clone());
+            trie1
+                .insert(k0.as_bytes().to_vec(), v.as_bytes().to_vec())
+                .unwrap();
+            trie1
+                .insert(k1.as_bytes().to_vec(), v.as_bytes().to_vec())
+                .unwrap();
+            trie1.root().unwrap();
+            let root = trie1.root().unwrap();
+            let mut trie2 = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+            trie2.remove(k1.as_bytes()).unwrap();
+            trie2.root().unwrap()
+        };
+
+        assert_eq!(root1, root2);
+        assert_eq!(root2, root3);
+    }
+
+    #[test]
+    fn test_delete_stale_keys_with_random_insert_and_delete() {
+        let memdb = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb);
+
+        let mut rng = rand::thread_rng();
+        let mut keys = vec![];
+        for _ in 0..100 {
+            let random_bytes: Vec<u8> = (0..rng.gen_range(2, 30))
+                .map(|_| rand::random::<u8>())
+                .collect();
+            trie.insert(random_bytes.clone(), random_bytes.clone())
+                .unwrap();
+            keys.push(random_bytes.clone());
+        }
+        trie.commit().unwrap();
+        let slice = &mut keys;
+        slice.shuffle(&mut rng);
+
+        for key in slice.iter() {
+            trie.remove(key).unwrap();
+        }
+        trie.commit().unwrap();
+
+        let empty_node_key = sha3::Keccak256::digest(&rlp::NULL_RLP);
+        let value = trie.db.get(empty_node_key.as_ref()).unwrap().unwrap();
+        assert_eq!(value, &rlp::NULL_RLP)
+    }
+
     #[test]
     fn insert_full_branch() {
         let memdb = MemoryDB::new(true);
