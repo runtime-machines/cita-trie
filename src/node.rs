@@ -41,23 +41,26 @@ impl Debug for Node {
 }
 
 impl Node {
-    pub fn from_leaf(key: NibbleVec, value: Vec<u8>) -> Self {
+    /// Creates a node from leaf and leaks it
+    pub(crate) fn from_leaf(key: NibbleVec, value: Vec<u8>) -> Self {
         let ptr = Box::leak(Box::new(LeafNode { key, value }));
         Node::Leaf(NonNull::new(ptr).unwrap())
     }
 
-    pub fn from_branch(children: [Node; 16], value: Option<Vec<u8>>) -> Self {
+    /// Creates a node from branch and leaks it
+    pub(crate) fn from_branch(children: [Node; 16], value: Option<Vec<u8>>) -> Self {
         let ptr = Box::leak(Box::new(BranchNode { children, value }));
         Node::Branch(NonNull::new(ptr).unwrap())
     }
 
-    pub fn from_extension(prefix: NibbleVec, node: Node) -> Self {
+    /// Creates a node from extension and leaks it
+    pub(crate) fn from_extension(prefix: NibbleVec, node: Node) -> Self {
         let ptr = Box::leak(Box::new(ExtensionNode { prefix, node }));
         Node::Extension(NonNull::new(ptr).unwrap())
     }
 
-    pub fn from_hash(hash: [u8; 32]) -> Self {
-        eprintln!("hash = {:02x?}", hash);
+    /// Creates a node from hash and leaks it
+    pub(crate) fn from_hash(hash: [u8; 32]) -> Self {
         let ptr = Box::leak(Box::new(HashNode { hash }));
         Node::Hash(NonNull::new(ptr).unwrap())
     }
@@ -67,6 +70,11 @@ impl Node {
 pub struct LeafNode {
     pub key: NibbleVec,
     pub value: Vec<u8>,
+}
+
+/// Returns an `owned` value to a node
+pub(crate) unsafe fn from_raw<T, N: Into<NonNull<T>>>(mut ptr: N) -> Box<T> {
+    Box::from_raw(ptr.into().as_mut())
 }
 
 #[derive(Debug)]
