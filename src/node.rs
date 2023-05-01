@@ -73,7 +73,7 @@ pub struct LeafNode {
 }
 
 /// Returns an `owned` value to a node
-pub(crate) unsafe fn from_raw<T, N: Into<NonNull<T>>>(mut ptr: N) -> Box<T> {
+pub(crate) unsafe fn from_raw<T, N: Into<NonNull<T>>>(ptr: N) -> Box<T> {
     Box::from_raw(ptr.into().as_mut())
 }
 

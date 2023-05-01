@@ -33,7 +33,7 @@ impl NibbleSlice {
         self.slice(index, self.len())
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    pub fn _as_bytes(&self) -> &[u8] {
         &self.0
     }
 
@@ -160,7 +160,7 @@ impl NibbleVec {
         (raw, is_leaf)
     }
 
-    pub fn get_data(&self) -> &[u8] {
+    pub fn _get_data(&self) -> &[u8] {
         &self.hex_data
     }
 

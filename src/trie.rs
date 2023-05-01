@@ -1,9 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::hash::Hash;
 use std::mem;
-use std::ops::Deref;
 use std::ptr::NonNull;
 
 use rlp::{Prototype, Rlp, RlpStream};
@@ -79,20 +77,20 @@ impl<D: DB + Clone> PatriciaTrie<D> {
     unsafe fn drop_inner(&mut self, node: Node) {
         match node {
             Node::Empty => {}
-            Node::Leaf(mut leaf) => {
+            Node::Leaf(leaf) => {
                 from_raw(leaf);
             }
-            Node::Extension(mut ext) => {
+            Node::Extension(ext) => {
                 let ext_owned = from_raw(ext);
                 self.drop_inner(ext_owned.node);
             }
-            Node::Branch(mut branch) => {
+            Node::Branch(branch) => {
                 let branch_owned = from_raw(branch);
                 for node in branch_owned.children {
                     self.drop_inner(node);
                 }
             }
-            Node::Hash(mut hash_node) => unsafe {
+            Node::Hash(hash_node) => unsafe {
                 from_raw(hash_node);
             },
         }
@@ -451,7 +449,7 @@ where
                     Ok(None)
                 }
             }
-            Node::Hash(mut hash_node) => {
+            Node::Hash(hash_node) => {
                 // Construct a new node from database and get a value from it
                 let hash_node_ref = unsafe { hash_node.as_ref() };
                 // todo(arsenron): can we cache it? We can do something like iter all the trie and insert
@@ -551,7 +549,7 @@ where
                 if match_index == prefix.len() {
                     let new_node = self.insert_at(sub_node, partial.offset(match_index), value)?;
                     from_raw(ext_mut);
-                    return Ok(Node::from_extension(prefix.clone(), new_node));
+                    return Ok(Node::from_extension(prefix, new_node));
                 }
 
                 let new_ext = Node::from_extension(prefix.offset(match_index).to_owned(), sub_node);
@@ -560,7 +558,7 @@ where
                 ext_mut.node = new_node;
                 Ok(Node::Extension(ext))
             },
-            Node::Hash(mut hash_node) => {
+            Node::Hash(hash_node) => {
                 // Consume hash node and insert in-place an expanded node
                 let hash_node_owned = unsafe { from_raw(hash_node) };
 
@@ -574,7 +572,7 @@ where
     fn delete_at(&mut self, n: Node, partial: &NibbleSlice) -> TrieResult<(Node, bool)> {
         let (new_n, deleted) = match n {
             Node::Empty => Ok((Node::Empty, false)),
-            Node::Leaf(mut leaf) => unsafe {
+            Node::Leaf(leaf) => unsafe {
                 let leaf_ref = leaf.as_ref();
 
                 if &*leaf_ref.key == partial {
@@ -620,7 +618,7 @@ where
                     Ok((Node::Extension(ext), false))
                 }
             }
-            Node::Hash(mut hash_node) => {
+            Node::Hash(hash_node) => {
                 // eprintln!("self.root = {:#?}", self.root);
                 // Consume hash node and insert in-place an expanded node
                 let hash_node_owned = unsafe { from_raw(hash_node) };
@@ -667,10 +665,10 @@ where
                         Node::from_extension(NibbleVec::from_hex(vec![used_index as u8]), n);
                     self.degenerate(new_node)
                 } else {
-                    Ok(Node::Branch(branch.clone()))
+                    Ok(Node::Branch(branch))
                 }
             }
-            Node::Extension(mut ext) => {
+            Node::Extension(ext) => {
                 let ext_ref = unsafe { ext.as_ref() };
 
                 let prefix = &ext_ref.prefix;
@@ -684,16 +682,15 @@ where
                         self.degenerate(Node::Extension(sub_ext))
                     },
                     Node::Leaf(mut leaf) => unsafe {
-                        let leaf_mut = unsafe { leaf.as_mut() };
+                        let leaf_mut = leaf.as_mut();
                         leaf_mut.key = prefix.join(&leaf_mut.key);
                         // drop parent extension and creating a leaf instead
                         from_raw(ext);
                         Ok(Node::Leaf(leaf))
                     },
                     // try again after recovering node from the db.
-                    Node::Hash(mut hash_node) => unsafe {
-                        // todo(arsenron): here are leaks
-                        let hash = unsafe { hash_node.as_ref().hash };
+                    Node::Hash(hash_node) => unsafe {
+                        let hash = hash_node.as_ref().hash;
                         self.passing_keys.insert(hash);
 
                         let new_node = self.recover_from_db(&hash)?;
@@ -1089,7 +1086,6 @@ mod tests {
         assert_eq!(Some(b"test55".to_vec()), v);
     }
 
-    // cargo +nightly miri test trie::tests::test_trie_from_root_and_delete
     #[test]
     fn test_trie_from_root_and_delete() {
         let memdb = MemoryDB::new(true);
@@ -1099,19 +1095,41 @@ mod tests {
             trie.insert(b"test1".to_vec(), b"test".to_vec()).unwrap();
             trie.insert(b"test2".to_vec(), b"test".to_vec()).unwrap();
             trie.insert(b"test23".to_vec(), b"test".to_vec()).unwrap();
-            // trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
-            // trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
             trie.commit().unwrap()
         };
 
         let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
-        // trie.insert(b"1".to_vec(), b"2".to_vec());
+        let value = trie.get(b"test").unwrap();
+        assert!(value.is_some());
         let removed = trie.remove(b"test").unwrap();
-        // assert!(removed);
-        // let removed = trie.remove(b"test33").unwrap();
-        // assert!(removed);
-        // let removed = trie.remove(b"test23").unwrap();
-        // assert!(removed);
+        assert!(removed);
+        let value_back = trie.get(b"test").unwrap();
+        assert!(value_back.is_none());
+    }
+
+    #[test]
+    fn test_trie_from_root_and_delete_2() {
+        let memdb = MemoryDB::new(true);
+        let root = {
+            let mut trie = PatriciaTrie::new(memdb.clone());
+            trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test1".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test2".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test23".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
+            trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
+            trie.commit().unwrap()
+        };
+
+        let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+        let removed = trie.remove(b"test44").unwrap();
+        assert!(removed);
+        let removed = trie.remove(b"test33").unwrap();
+        assert!(removed);
+        let removed = trie.remove(b"test23").unwrap();
+        assert!(removed);
     }
 
     #[test]

@@ -46,9 +46,15 @@ fn main() {
     assert_eq!(removed, true);
     let new_root = trie.root().unwrap();
     println!("new root = {:?}", new_root);
-
 }
 
+```
+
+## Test
+
+```sh
+cargo clean
+cargo +nightly miri test
 ```
 
 ## Benchmark
@@ -97,6 +103,7 @@ Found 11 outliers among 100 measurements (11.00%)
 ```
 
 ### Custom hash algorithm
+
 See: https://crates.io/crates/hasher
 
 ### Custom storage
