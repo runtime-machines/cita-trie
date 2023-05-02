@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use rlp::{Prototype, Rlp, RlpStream};
 use sha3::Digest;
@@ -63,7 +64,6 @@ pub struct PatriciaTrie<D> {
 
 impl<D> Drop for PatriciaTrie<D> {
     fn drop(&mut self) {
-        // let node = mem::replace(&mut self.root, Node::Empty);
         unsafe { Node::deallocate(self.root.clone()) }
     }
 }
@@ -112,6 +112,7 @@ where
     trie: &'a PatriciaTrie<D>,
     nibble: NibbleVec,
     nodes: Vec<TraceNode>,
+    recovered_nodes: Rc<RefCell<Vec<Node>>>,
 }
 
 impl<'a, D> Iterator for TrieIterator<'a, D>
@@ -182,6 +183,7 @@ where
                             .recover_from_db(&unsafe { hash_node.as_ref() }.hash.clone())
                         {
                             self.nodes.pop();
+                            self.recovered_nodes.borrow_mut().push(n.clone());
                             self.nodes.push(n.into());
                         } else {
                             //error!();
@@ -206,6 +208,9 @@ where
                     _ => {}
                 }
             } else {
+                for n in self.recovered_nodes.borrow_mut().drain(..) {
+                    unsafe { Node::deallocate(n) }
+                }
                 return None;
             }
         }
@@ -222,6 +227,7 @@ where
             trie: self,
             nibble: NibbleVec::from_raw(vec![], false),
             nodes,
+            recovered_nodes: Default::default(),
         }
     }
     pub fn new(db: D) -> Self {
@@ -1188,70 +1194,70 @@ mod tests {
         let v = trie.get(b"test").unwrap();
         assert_eq!(Some(b"test".to_vec()), v);
     }
-    //
-    // #[test]
-    // fn iterator_trie() {
-    //     let memdb = MemoryDB::new(true);
-    //     let root1;
-    //     let mut kv = HashMap::new();
-    //     kv.insert(b"test".to_vec(), b"test".to_vec());
-    //     kv.insert(b"test1".to_vec(), b"test1".to_vec());
-    //     kv.insert(b"test11".to_vec(), b"test2".to_vec());
-    //     kv.insert(b"test14".to_vec(), b"test3".to_vec());
-    //     kv.insert(b"test16".to_vec(), b"test4".to_vec());
-    //     kv.insert(b"test18".to_vec(), b"test5".to_vec());
-    //     kv.insert(b"test2".to_vec(), b"test6".to_vec());
-    //     kv.insert(b"test23".to_vec(), b"test7".to_vec());
-    //     kv.insert(b"test9".to_vec(), b"test8".to_vec());
-    //     {
-    //         let mut trie = PatriciaTrie::new(memdb.clone());
-    //         let mut kv = kv.clone();
-    //         kv.iter().for_each(|(k, v)| {
-    //             trie.insert(k.clone(), v.clone()).unwrap();
-    //         });
-    //         root1 = trie.root().unwrap();
-    //
-    //         trie.iter()
-    //             .for_each(|(k, v)| assert_eq!(kv.remove(&k).unwrap(), v));
-    //         assert!(kv.is_empty());
-    //     }
-    //
-    //     {
-    //         let mut trie = PatriciaTrie::new(memdb.clone());
-    //         let mut kv2 = HashMap::new();
-    //         kv2.insert(b"test".to_vec(), b"test11".to_vec());
-    //         kv2.insert(b"test1".to_vec(), b"test12".to_vec());
-    //         kv2.insert(b"test14".to_vec(), b"test13".to_vec());
-    //         kv2.insert(b"test22".to_vec(), b"test14".to_vec());
-    //         kv2.insert(b"test9".to_vec(), b"test15".to_vec());
-    //         kv2.insert(b"test16".to_vec(), b"test16".to_vec());
-    //         kv2.insert(b"test2".to_vec(), b"test17".to_vec());
-    //         kv2.iter().for_each(|(k, v)| {
-    //             trie.insert(k.clone(), v.clone()).unwrap();
-    //         });
-    //
-    //         trie.root().unwrap();
-    //
-    //         let mut kv_delete = HashSet::new();
-    //         kv_delete.insert(b"test".to_vec());
-    //         kv_delete.insert(b"test1".to_vec());
-    //         kv_delete.insert(b"test14".to_vec());
-    //
-    //         kv_delete.iter().for_each(|k| {
-    //             trie.remove(k).unwrap();
-    //         });
-    //
-    //         kv2.retain(|k, _| !kv_delete.contains(k));
-    //
-    //         trie.root().unwrap();
-    //         trie.iter()
-    //             .for_each(|(k, v)| assert_eq!(kv2.remove(&k).unwrap(), v));
-    //         assert!(kv2.is_empty());
-    //     }
-    //
-    //     let trie = PatriciaTrie::from(memdb, &root1).unwrap();
-    //     trie.iter()
-    //         .for_each(|(k, v)| assert_eq!(kv.remove(&k).unwrap(), v));
-    //     assert!(kv.is_empty());
-    // }
+
+    #[test]
+    fn iterator_trie() {
+        let memdb = MemoryDB::new(true);
+        let root1;
+        let mut kv = HashMap::new();
+        kv.insert(b"test".to_vec(), b"test".to_vec());
+        kv.insert(b"test1".to_vec(), b"test1".to_vec());
+        kv.insert(b"test11".to_vec(), b"test2".to_vec());
+        kv.insert(b"test14".to_vec(), b"test3".to_vec());
+        kv.insert(b"test16".to_vec(), b"test4".to_vec());
+        kv.insert(b"test18".to_vec(), b"test5".to_vec());
+        kv.insert(b"test2".to_vec(), b"test6".to_vec());
+        kv.insert(b"test23".to_vec(), b"test7".to_vec());
+        kv.insert(b"test9".to_vec(), b"test8".to_vec());
+        {
+            let mut trie = PatriciaTrie::new(memdb.clone());
+            let mut kv = kv.clone();
+            kv.iter().for_each(|(k, v)| {
+                trie.insert(k.clone(), v.clone()).unwrap();
+            });
+            root1 = trie.root().unwrap();
+
+            trie.iter()
+                .for_each(|(k, v)| assert_eq!(kv.remove(&k).unwrap(), v));
+            assert!(kv.is_empty());
+        }
+
+        {
+            let mut trie = PatriciaTrie::new(memdb.clone());
+            let mut kv2 = HashMap::new();
+            kv2.insert(b"test".to_vec(), b"test11".to_vec());
+            kv2.insert(b"test1".to_vec(), b"test12".to_vec());
+            kv2.insert(b"test14".to_vec(), b"test13".to_vec());
+            kv2.insert(b"test22".to_vec(), b"test14".to_vec());
+            kv2.insert(b"test9".to_vec(), b"test15".to_vec());
+            kv2.insert(b"test16".to_vec(), b"test16".to_vec());
+            kv2.insert(b"test2".to_vec(), b"test17".to_vec());
+            kv2.iter().for_each(|(k, v)| {
+                trie.insert(k.clone(), v.clone()).unwrap();
+            });
+
+            trie.root().unwrap();
+
+            let mut kv_delete = HashSet::new();
+            kv_delete.insert(b"test".to_vec());
+            kv_delete.insert(b"test1".to_vec());
+            kv_delete.insert(b"test14".to_vec());
+
+            kv_delete.iter().for_each(|k| {
+                trie.remove(k).unwrap();
+            });
+
+            kv2.retain(|k, _| !kv_delete.contains(k));
+
+            trie.root().unwrap();
+            trie.iter()
+                .for_each(|(k, v)| assert_eq!(kv2.remove(&k).unwrap(), v));
+            assert!(kv2.is_empty());
+        }
+
+        let trie = PatriciaTrie::from(memdb, &root1).unwrap();
+        trie.iter()
+            .for_each(|(k, v)| assert_eq!(kv.remove(&k).unwrap(), v));
+        assert!(kv.is_empty());
+    }
 }
