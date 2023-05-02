@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::mem;
 use std::ptr::NonNull;
 
 use rlp::{Prototype, Rlp, RlpStream};
@@ -50,10 +49,7 @@ pub trait Trie<D: DB> {
 }
 
 #[derive(Debug, Clone)]
-pub struct PatriciaTrie<D>
-where
-    D: DB + Clone,
-{
+pub struct PatriciaTrie<D> {
     root: Node,
     root_hash: Vec<u8>,
 
@@ -65,35 +61,10 @@ where
     gen_keys: RefCell<HashSet<[u8; 32]>>,
 }
 
-impl<D: DB + Clone> Drop for PatriciaTrie<D> {
+impl<D> Drop for PatriciaTrie<D> {
     fn drop(&mut self) {
-        let node = mem::replace(&mut self.root, Node::Empty);
-        unsafe { self.drop_inner(node) }
-    }
-}
-
-impl<D: DB + Clone> PatriciaTrie<D> {
-    /// Recursively drops all the allocated nodes
-    unsafe fn drop_inner(&mut self, node: Node) {
-        match node {
-            Node::Empty => {}
-            Node::Leaf(leaf) => {
-                to_owned(leaf);
-            }
-            Node::Extension(ext) => {
-                let ext_owned = to_owned(ext);
-                self.drop_inner(ext_owned.node);
-            }
-            Node::Branch(branch) => {
-                let branch_owned = to_owned(branch);
-                for node in branch_owned.children {
-                    self.drop_inner(node);
-                }
-            }
-            Node::Hash(hash_node) => unsafe {
-                to_owned(hash_node);
-            },
-        }
+        // let node = mem::replace(&mut self.root, Node::Empty);
+        unsafe { Node::deallocate(self.root.clone()) }
     }
 }
 
@@ -482,7 +453,6 @@ where
 
                 let leaf_owned = to_owned(leaf_mut);
                 let old_partial = &leaf_owned.key;
-                // todo(arsenron): Remove unnecessary allocation, i.e. mutate previous one
                 let n = Node::from_leaf(
                     old_partial.offset(match_index + 1).to_owned(),
                     leaf_owned.value,
@@ -771,8 +741,7 @@ where
         self.root_hash = root_hash.to_vec();
         self.gen_keys.borrow_mut().clear();
         self.passing_keys.clear();
-        let prev_root = mem::replace(&mut self.root, Node::Empty);
-        unsafe { self.drop_inner(prev_root) };
+        unsafe { Node::deallocate(self.root.clone()) };
         self.root = self.recover_from_db(&root_hash)?;
         Ok(root_hash)
     }

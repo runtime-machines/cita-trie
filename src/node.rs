@@ -64,6 +64,28 @@ impl Node {
         let ptr = Box::leak(Box::new(HashNode { hash }));
         Node::Hash(NonNull::new(ptr).unwrap())
     }
+
+    pub(crate) unsafe fn deallocate(node: Self) {
+        match node {
+            Node::Empty => {}
+            Node::Leaf(leaf) => {
+                to_owned(leaf);
+            }
+            Node::Extension(ext) => {
+                let ext_owned = to_owned(ext);
+                Self::deallocate(ext_owned.node);
+            }
+            Node::Branch(branch) => {
+                let branch_owned = to_owned(branch);
+                for node in branch_owned.children {
+                    Self::deallocate(node);
+                }
+            }
+            Node::Hash(hash_node) => unsafe {
+                to_owned(hash_node);
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
