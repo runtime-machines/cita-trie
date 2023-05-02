@@ -10,7 +10,7 @@ use sha3::Digest;
 use crate::db::{MemoryDB, DB};
 use crate::errors::TrieError;
 use crate::nibbles::{NibbleSlice, NibbleVec};
-use crate::node::{empty_children, from_raw, BranchNode, Node};
+use crate::node::{empty_children, to_owned, BranchNode, Node};
 
 pub type TrieResult<T> = Result<T, TrieError>;
 
@@ -78,20 +78,20 @@ impl<D: DB + Clone> PatriciaTrie<D> {
         match node {
             Node::Empty => {}
             Node::Leaf(leaf) => {
-                from_raw(leaf);
+                to_owned(leaf);
             }
             Node::Extension(ext) => {
-                let ext_owned = from_raw(ext);
+                let ext_owned = to_owned(ext);
                 self.drop_inner(ext_owned.node);
             }
             Node::Branch(branch) => {
-                let branch_owned = from_raw(branch);
+                let branch_owned = to_owned(branch);
                 for node in branch_owned.children {
                     self.drop_inner(node);
                 }
             }
             Node::Hash(hash_node) => unsafe {
-                from_raw(hash_node);
+                to_owned(hash_node);
             },
         }
     }
@@ -480,7 +480,7 @@ where
                     value: None,
                 };
 
-                let leaf_owned = from_raw(leaf_mut);
+                let leaf_owned = to_owned(leaf_mut);
                 let old_partial = &leaf_owned.key;
                 // todo(arsenron): Remove unnecessary allocation, i.e. mutate previous one
                 let n = Node::from_leaf(
@@ -521,7 +521,7 @@ where
                 let match_index = partial.common_prefix(&ext_mut.prefix);
 
                 if match_index == 0 {
-                    let ext_owned = from_raw(ext_mut);
+                    let ext_owned = to_owned(ext_mut);
                     let mut branch = BranchNode {
                         children: empty_children(),
                         value: None,
@@ -548,7 +548,7 @@ where
 
                 if match_index == prefix.len() {
                     let new_node = self.insert_at(sub_node, partial.offset(match_index), value)?;
-                    from_raw(ext_mut);
+                    to_owned(ext_mut);
                     return Ok(Node::from_extension(prefix, new_node));
                 }
 
@@ -560,7 +560,7 @@ where
             },
             Node::Hash(hash_node) => {
                 // Consume hash node and insert in-place an expanded node
-                let hash_node_owned = unsafe { from_raw(hash_node) };
+                let hash_node_owned = unsafe { to_owned(hash_node) };
 
                 self.passing_keys.insert(hash_node_owned.hash);
                 let n = self.recover_from_db(&hash_node_owned.hash)?;
@@ -576,7 +576,7 @@ where
                 let leaf_ref = leaf.as_ref();
 
                 if &*leaf_ref.key == partial {
-                    from_raw(leaf);
+                    to_owned(leaf);
                     return Ok((Node::Empty, true));
                 }
                 Ok((Node::Leaf(leaf), false))
@@ -619,16 +619,14 @@ where
                 }
             }
             Node::Hash(hash_node) => {
-                // eprintln!("self.root = {:#?}", self.root);
                 // Consume hash node and insert in-place an expanded node
-                let hash_node_owned = unsafe { from_raw(hash_node) };
+                let hash_node_owned = unsafe { to_owned(hash_node) };
                 self.passing_keys.insert(hash_node_owned.hash);
                 let n = self.recover_from_db(&hash_node_owned.hash)?;
                 self.delete_at(n, partial)
             }
         }?;
 
-        // Ok((new_n, deleted))
         if deleted {
             let degenerated = self.degenerate(new_n)?;
             Ok((degenerated, deleted))
@@ -653,13 +651,13 @@ where
                 if used_indexes.is_empty() && branch_mut.value.is_some() {
                     let key = NibbleVec::from_raw([].to_vec(), true);
                     // Drop branch node and replace it with leaf
-                    let branch_owned = unsafe { from_raw(branch_mut) };
+                    let branch_owned = unsafe { to_owned(branch_mut) };
                     Ok(Node::from_leaf(key, branch_owned.value.unwrap()))
                     // if only one node. make an extension.
                 } else if used_indexes.len() == 1 && branch_mut.value.is_none() {
                     let used_index = used_indexes[0];
                     let n = branch_mut.children[used_index].clone();
-                    unsafe { from_raw(branch_mut) };
+                    unsafe { to_owned(branch_mut) };
 
                     let new_node =
                         Node::from_extension(NibbleVec::from_hex(vec![used_index as u8]), n);
@@ -678,26 +676,24 @@ where
                         let sub_ext_mut = sub_ext.as_mut();
                         sub_ext_mut.prefix = prefix.join(&sub_ext_mut.prefix);
                         // drop parent extension node after merging
-                        from_raw(ext);
+                        to_owned(ext);
                         self.degenerate(Node::Extension(sub_ext))
                     },
                     Node::Leaf(mut leaf) => unsafe {
                         let leaf_mut = leaf.as_mut();
                         leaf_mut.key = prefix.join(&leaf_mut.key);
                         // drop parent extension and creating a leaf instead
-                        from_raw(ext);
+                        to_owned(ext);
                         Ok(Node::Leaf(leaf))
                     },
                     // try again after recovering node from the db.
                     Node::Hash(hash_node) => unsafe {
                         let hash = hash_node.as_ref().hash;
                         self.passing_keys.insert(hash);
-
-                        let new_node = self.recover_from_db(&hash)?;
-
-                        let n = Node::from_extension(ext_ref.prefix.clone(), new_node);
-                        from_raw(ext);
-                        from_raw(hash_node);
+                        let recovered_node = self.recover_from_db(&hash)?;
+                        let n = Node::from_extension(ext_ref.prefix.clone(), recovered_node);
+                        to_owned(ext);
+                        to_owned(hash_node);
                         self.degenerate(n)
                     },
                     _ => Ok(Node::Extension(ext)),

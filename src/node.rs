@@ -72,8 +72,10 @@ pub struct LeafNode {
     pub value: Vec<u8>,
 }
 
-/// Returns an `owned` value to a node
-pub(crate) unsafe fn from_raw<T, N: Into<NonNull<T>>>(ptr: N) -> Box<T> {
+/// Dereferences a pointer to a node and returns and owned value.
+///
+/// See [Box::from_raw] docs.
+pub(crate) unsafe fn to_owned<T, N: Into<NonNull<T>>>(ptr: N) -> Box<T> {
     Box::from_raw(ptr.into().as_mut())
 }
 
@@ -87,9 +89,9 @@ impl BranchNode {
     pub(crate) fn insert(&mut self, i: usize, n: Node) {
         debug_assert!((0usize..=16).contains(&i));
         if i == 16 {
-            // Leaf node is substituted by branch node, so we deallocate a leaf node
-            if let Node::Leaf(mut leaf) = n {
-                let leaf_owned = unsafe { Box::from_raw(leaf.as_mut()) };
+            // Leaf node is substituted by branch node, so we drop a leaf node
+            if let Node::Leaf(leaf) = n {
+                let leaf_owned = unsafe { to_owned(leaf) };
                 self.value = Some(leaf_owned.value);
             } else {
                 panic!("The n must be leaf node")
