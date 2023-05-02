@@ -96,7 +96,7 @@ pub struct LeafNode {
 
 /// Dereferences a pointer to a node and returns and owned value.
 ///
-/// See [Box::from_raw] docs.
+/// See [Box::from_raw]
 pub(crate) unsafe fn to_owned<T, N: Into<NonNull<T>>>(ptr: N) -> Box<T> {
     Box::from_raw(ptr.into().as_mut())
 }

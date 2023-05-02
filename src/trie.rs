@@ -146,9 +146,6 @@ where
                             Node::Branch(_) => {
                                 self.nibble.pop();
                             }
-                            // Node::Hash(hash_node) => {
-                            //     panic!();
-                            // }
                             _ => {}
                         }
                         self.nodes.pop();
@@ -187,7 +184,7 @@ where
                             self.recovered_nodes.borrow_mut().push(n.clone());
                             self.nodes.push(n.into());
                         } else {
-                            //error!();
+                            // todo: log / tracing warn here, as it is error
                             return None;
                         }
                     }
@@ -688,6 +685,7 @@ where
     // In the code below, we only add the nodes get by `get_node_from_hash`, because they contains
     // all data stored in db, including nodes whose encoded data is less than hash length.
     fn get_path_at(&self, n: Node, partial: &NibbleSlice) -> TrieResult<Vec<Node>> {
+        // todo: check if this works without UB or memory leaks
         match n {
             Node::Empty | Node::Leaf(_) => Ok(vec![]),
             Node::Branch(branch) => {
