@@ -16,13 +16,13 @@ pub trait DB: Send + Sync {
 
     fn contains(&self, key: &[u8]) -> Result<bool, Self::Error>;
 
-    /// Insert data into the cache.
+    /// Inserts data into the cache.
     fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Self::Error>;
 
-    /// Insert data into the cache.
+    /// Removes data from the cache.
     fn remove(&self, key: &[u8]) -> Result<(), Self::Error>;
 
-    /// Insert a batch of data into the cache.
+    /// Inserts a batch of data into the cache.
     fn insert_batch<I>(&self, items: I) -> Result<(), Self::Error>
     where
         I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
@@ -34,7 +34,7 @@ pub trait DB: Send + Sync {
         Ok(())
     }
 
-    /// Remove a batch of data into the cache.
+    /// Removes a batch of data into the cache.
     fn remove_batch<I: IntoIterator<Item = A>, A: AsRef<[u8]>>(
         &self,
         keys: I,
@@ -45,7 +45,7 @@ pub trait DB: Send + Sync {
         Ok(())
     }
 
-    /// Flush data to the DB from the cache.
+    /// Flushes data to the DB from the cache.
     fn flush(&self) -> Result<(), Self::Error>;
 }
 

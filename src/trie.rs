@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use rlp::{Prototype, Rlp, RlpStream};
 use sha3::Digest;
@@ -57,9 +58,9 @@ pub struct PatriciaTrie<D> {
     db: D,
     backup_db: Option<D>,
 
-    cache: RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+    cache: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     passing_keys: HashSet<[u8; 32]>,
-    gen_keys: RefCell<HashSet<[u8; 32]>>,
+    gen_keys: Arc<Mutex<HashSet<[u8; 32]>>>,
 }
 
 impl<D> Drop for PatriciaTrie<D> {
@@ -235,9 +236,9 @@ where
             root: Node::Empty,
             root_hash: sha3::Keccak256::digest(rlp::NULL_RLP.as_ref()).to_vec(),
 
-            cache: RefCell::new(HashMap::new()),
-            passing_keys: HashSet::new(),
-            gen_keys: RefCell::new(HashSet::new()),
+            cache: Default::default(),
+            passing_keys: Default::default(),
+            gen_keys: Default::default(),
 
             db,
             backup_db: None,
@@ -251,9 +252,9 @@ where
                     root: Node::Empty,
                     root_hash: root.to_vec(),
 
-                    cache: RefCell::new(HashMap::new()),
-                    passing_keys: HashSet::new(),
-                    gen_keys: RefCell::new(HashSet::new()),
+                    cache: Default::default(),
+                    passing_keys: Default::default(),
+                    gen_keys: Default::default(),
 
                     db,
                     backup_db: None,
@@ -276,9 +277,9 @@ where
             root: Node::Empty,
             root_hash: sha3::Keccak256::digest(rlp::NULL_RLP.as_ref()).to_vec(),
 
-            cache: RefCell::new(HashMap::new()),
-            passing_keys: HashSet::new(),
-            gen_keys: RefCell::new(HashSet::new()),
+            cache: Default::default(),
+            passing_keys: Default::default(),
+            gen_keys: Default::default(),
 
             db,
             backup_db,
@@ -291,16 +292,17 @@ where
         let mut addr_list = vec![];
         pt.iter().for_each(|(k, _v)| addr_list.push(k));
         let encoded = pt.cache_node(root)?;
-        pt.cache
-            .borrow_mut()
-            .insert(sha3::Keccak256::digest(&encoded).to_vec(), encoded);
+        {
+            let mut cache = pt.cache.lock().unwrap();
+            cache.insert(sha3::Keccak256::digest(&encoded).to_vec(), encoded);
 
-        // store data in backup db
-        pt.backup_db
-            .clone()
-            .unwrap()
-            .insert_batch(pt.cache.borrow_mut().drain())
-            .map_err(|e| TrieError::DB(e.to_string()))?;
+            // store data in backup db
+            pt.backup_db
+                .clone()
+                .unwrap()
+                .insert_batch(cache.drain())
+                .map_err(|e| TrieError::DB(e.to_string()))?;
+        }
         pt.backup_db
             .clone()
             .unwrap()
@@ -721,22 +723,25 @@ where
 
     fn commit(&mut self) -> TrieResult<Vec<u8>> {
         let encoded = self.encode_node(self.root.clone());
+        let mut cache = self.cache.lock().unwrap();
         let root_hash = if encoded.len() < sha3::Keccak256::output_size() {
             let hash = sha3::Keccak256::digest(&encoded).to_vec();
-            self.cache.borrow_mut().insert(hash.clone(), encoded);
+            cache.insert(hash.clone(), encoded);
             hash
         } else {
             encoded
         };
 
         self.db
-            .insert_batch(self.cache.borrow_mut().drain())
+            .insert_batch(cache.drain())
             .map_err(|e| TrieError::DB(e.to_string()))?;
+        drop(cache);
 
+        let mut gen_keys = self.gen_keys.lock().unwrap();
         let removed_keys: Vec<Vec<u8>> = self
             .passing_keys
             .iter()
-            .filter(|h| !self.gen_keys.borrow().contains(*h))
+            .filter(|h| !gen_keys.contains(*h))
             .map(|h| h.to_vec())
             .collect();
 
@@ -745,7 +750,8 @@ where
             .map_err(|e| TrieError::DB(e.to_string()))?;
 
         self.root_hash = root_hash.to_vec();
-        self.gen_keys.borrow_mut().clear();
+        gen_keys.clear();
+        drop(gen_keys);
         self.passing_keys.clear();
         unsafe { Node::deallocate(self.root.clone()) };
         self.root = self.recover_from_db(&root_hash)?;
@@ -765,9 +771,9 @@ where
             data
         } else {
             let hash = sha3::Keccak256::digest(&data);
-            self.cache.borrow_mut().insert(hash.to_vec(), data);
+            self.cache.lock().unwrap().insert(hash.to_vec(), data);
 
-            self.gen_keys.borrow_mut().insert(hash.into());
+            self.gen_keys.lock().unwrap().insert(hash.into());
             hash.to_vec()
         }
     }
@@ -922,7 +928,7 @@ where
                 let hash = unsafe { hash_node.as_ref() }.hash;
                 let next_node = self.recover_from_db(&hash)?;
                 let data = self.cache_node(next_node)?;
-                self.cache.borrow_mut().insert(hash.to_vec(), data);
+                self.cache.lock().unwrap().insert(hash.to_vec(), data);
                 Ok(hash.to_vec())
             }
         }
@@ -939,7 +945,6 @@ mod tests {
 
     use super::{PatriciaTrie, Trie};
     use crate::db::{MemoryDB, DB};
-    use crate::node::Node;
 
     #[test]
     fn test_trie_insert() {
@@ -990,11 +995,8 @@ mod tests {
         let mut trie = PatriciaTrie::new(memdb);
         trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
         trie.insert(b"test2".to_vec(), b"test".to_vec()).unwrap();
-        // trie.insert(b"test3".to_vec(), b"test".to_vec()).unwrap();
-        // eprintln!("trie.root = {:#?}", trie.root);
-        // eprintln!("trie.root = {:#?}", trie.root);
         let removed = trie.remove(b"test2").unwrap();
-        // assert!(removed)
+        assert!(removed)
     }
 
     #[test]
