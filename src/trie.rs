@@ -960,7 +960,6 @@ mod tests {
         let mut trie = PatriciaTrie::new(memdb);
         trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
         trie.insert(b"tswq".to_vec(), b"test2".to_vec()).unwrap();
-        eprintln!("trie = {:#?}", trie.root);
     }
 
     #[test]
@@ -1036,7 +1035,7 @@ mod tests {
             trie.root().unwrap()
         };
 
-        let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+        let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
         let v1 = trie.get(b"test33").unwrap();
         assert_eq!(Some(b"test".to_vec()), v1);
         let v2 = trie.get(b"test44").unwrap();
@@ -1046,7 +1045,6 @@ mod tests {
     }
 
     #[test]
-    // cargo +nightly miri test trie::tests::test_trie_from_root_and_insert -- --nocapture
     fn test_trie_from_root_and_insert() {
         let memdb = MemoryDB::new(true);
         let root = {
@@ -1060,7 +1058,7 @@ mod tests {
             trie.commit().unwrap()
         };
 
-        let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+        let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
         trie.insert(b"test55".to_vec(), b"test55".to_vec()).unwrap();
         trie.commit().unwrap();
         let v = trie.get(b"test55").unwrap();
@@ -1081,7 +1079,7 @@ mod tests {
             trie.commit().unwrap()
         };
 
-        let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+        let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
         let value = trie.get(b"test").unwrap();
         assert!(value.is_some());
         let removed = trie.remove(b"test").unwrap();
@@ -1104,7 +1102,7 @@ mod tests {
             trie.commit().unwrap()
         };
 
-        let mut trie = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+        let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
         let removed = trie.remove(b"test44").unwrap();
         assert!(removed);
         let removed = trie.remove(b"test33").unwrap();
@@ -1150,7 +1148,7 @@ mod tests {
                 .unwrap();
             trie1.root().unwrap();
             let root = trie1.root().unwrap();
-            let mut trie2 = PatriciaTrie::from(memdb.clone(), &root).unwrap();
+            let mut trie2 = PatriciaTrie::from(memdb, &root).unwrap();
             trie2.remove(k1.as_bytes()).unwrap();
             trie2.root().unwrap()
         };
@@ -1183,7 +1181,7 @@ mod tests {
         }
         trie.commit().unwrap();
 
-        let empty_node_key = sha3::Keccak256::digest(&rlp::NULL_RLP);
+        let empty_node_key = sha3::Keccak256::digest(rlp::NULL_RLP);
         let value = trie.db.get(empty_node_key.as_ref()).unwrap().unwrap();
         assert_eq!(value, &rlp::NULL_RLP)
     }
