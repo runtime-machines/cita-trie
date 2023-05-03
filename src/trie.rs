@@ -364,7 +364,18 @@ where
             Node::Empty => {}
             _ => path.push(self.root.clone()),
         }
-        Ok(path.into_iter().rev().map(|n| self.encode_raw(n)).collect())
+        let proof = Ok(path
+            .iter()
+            .rev()
+            .map(|n| self.encode_raw(n.clone()))
+            .collect());
+        if !path.is_empty() {
+            // exclude root
+            for n in path.drain(..path.len() - 1) {
+                unsafe { Node::deallocate(n) };
+            }
+        }
+        proof
     }
 
     /// return value if key exists, None if key not exist, Error if proof is wrong
@@ -685,7 +696,6 @@ where
     // In the code below, we only add the nodes get by `get_node_from_hash`, because they contains
     // all data stored in db, including nodes whose encoded data is less than hash length.
     fn get_path_at(&self, n: Node, partial: &NibbleSlice) -> TrieResult<Vec<Node>> {
-        // todo: check if this works without UB or memory leaks
         match n {
             Node::Empty | Node::Leaf(_) => Ok(vec![]),
             Node::Branch(branch) => {
