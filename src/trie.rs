@@ -267,7 +267,7 @@ where
     // extract specified height statedb in full node mode
     pub fn extract_backup(
         db: D,
-        backup_db: Option<D>,
+        backup_db: D,
         root_hash: &[u8],
     ) -> TrieResult<(Self, Vec<Vec<u8>>)> {
         let mut pt = Self {
@@ -279,7 +279,7 @@ where
             gen_keys: Default::default(),
 
             db,
-            backup_db,
+            backup_db: Some(backup_db),
         };
 
         let root = pt.recover_from_db(root_hash)?;
@@ -935,7 +935,8 @@ where
             Node::Hash(hash_node) => {
                 let hash = unsafe { hash_node.as_ref() }.hash;
                 let next_node = self.recover_from_db(&hash)?;
-                let data = self.cache_node(next_node)?;
+                let data = self.cache_node(next_node.clone())?;
+                unsafe { Node::deallocate(next_node) };
                 self.cache.lock().unwrap().insert(hash.to_vec(), data);
                 Ok(hash.to_vec())
             }
@@ -1267,5 +1268,22 @@ mod tests {
         trie.iter()
             .for_each(|(k, v)| assert_eq!(kv.remove(&k).unwrap(), v));
         assert!(kv.is_empty());
+    }
+
+    #[test]
+    fn test_extract_backup() {
+        let memdb = MemoryDB::new(true);
+        let memdb2 = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb.clone());
+
+        trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
+        trie.insert(b"test1".to_vec(), b"test".to_vec()).unwrap();
+        trie.insert(b"test2".to_vec(), b"test".to_vec()).unwrap();
+        trie.insert(b"test23".to_vec(), b"test".to_vec()).unwrap();
+        trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
+        trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
+        let hash = trie.root().unwrap();
+
+        assert!(PatriciaTrie::extract_backup(memdb, memdb2, &hash).is_ok());
     }
 }
