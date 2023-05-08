@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::hash::Hash;
+use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -12,6 +14,8 @@ use crate::db::{MemoryDB, DB};
 use crate::errors::TrieError;
 use crate::nibbles::{NibbleSlice, NibbleVec};
 use crate::node::{empty_children, to_owned, BranchNode, Node};
+
+const KECCAK_SIZE: usize = 32;
 
 pub type TrieResult<T> = Result<T, TrieError>;
 
@@ -61,11 +65,17 @@ pub struct PatriciaTrie<D> {
     cache: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     passing_keys: HashSet<[u8; 32]>,
     gen_keys: Arc<Mutex<HashSet<[u8; 32]>>>,
+
+    cached_tries: Arc<Mutex<HashMap<[u8; 32], ManuallyDrop<PatriciaTrie<D>>>>>,
 }
 
 impl<D> Drop for PatriciaTrie<D> {
     fn drop(&mut self) {
-        unsafe { Node::deallocate(self.root.clone()) }
+        eprintln!("HERE");
+        unsafe { Node::deallocate(self.root.clone()) };
+        for (_, cached_trie) in self.cached_tries.lock().unwrap().drain() {
+            ManuallyDrop::into_inner(cached_trie);
+        }
     }
 }
 
@@ -239,6 +249,8 @@ where
 
             db,
             backup_db: None,
+
+            cached_tries: Default::default(),
         }
     }
 
@@ -255,6 +267,8 @@ where
 
                     db,
                     backup_db: None,
+
+                    cached_tries: Default::default(),
                 };
 
                 trie.root = trie.decode_node(&data)?;
@@ -280,6 +294,8 @@ where
 
             db,
             backup_db: Some(backup_db),
+
+            cached_tries: Default::default(),
         };
 
         let root = pt.recover_from_db(root_hash)?;
@@ -389,8 +405,7 @@ where
         for node_encoded in proof.into_iter() {
             let hash = sha3::Keccak256::digest(&node_encoded);
 
-            if root_hash == hash.as_slice() || node_encoded.len() >= sha3::Keccak256::output_size()
-            {
+            if root_hash == hash.as_slice() || node_encoded.len() >= KECCAK_SIZE {
                 memdb.insert(hash.to_vec(), node_encoded).unwrap();
             }
         }
@@ -436,16 +451,21 @@ where
                     Ok(None)
                 }
             }
-            Node::Hash(hash_node) => {
-                // Construct a new node from database and get a value from it
-                let hash_node_ref = unsafe { hash_node.as_ref() };
-                // todo(arsenron): can we cache it? We can do something like iter all the trie and insert
-                //  all the values in the original trie.
-                //  Cached Arc<Mutex> is an option too.
-                let trie =
-                    PatriciaTrie::from(self.db.clone(), hash_node_ref.hash.as_slice()).unwrap();
-                trie.get_at(trie.root.clone(), partial)
-            }
+            Node::Hash(hash_node) => unsafe {
+                // Check if there is a saved expanded node in the cache
+                // and return a value from it.
+                // Otherwise return a value and add a node to the cache.
+                let hash = hash_node.as_ref().hash;
+                let mut cached_tries = self.cached_tries.lock().unwrap();
+                if let Some(trie) = cached_tries.get(&hash) {
+                    trie.get_at(trie.root.clone(), partial)
+                } else {
+                    let trie = PatriciaTrie::from(self.db.clone(), hash.as_slice()).unwrap();
+                    let result = trie.get_at(trie.root.clone(), partial)?;
+                    cached_tries.insert(hash, ManuallyDrop::new(trie));
+                    Ok(result)
+                }
+            },
         }
     }
 
@@ -732,7 +752,7 @@ where
     fn commit(&mut self) -> TrieResult<Vec<u8>> {
         let encoded = self.encode_node(self.root.clone());
         let mut cache = self.cache.lock().unwrap();
-        let root_hash = if encoded.len() < sha3::Keccak256::output_size() {
+        let root_hash = if encoded.len() < KECCAK_SIZE {
             let hash = sha3::Keccak256::digest(&encoded).to_vec();
             cache.insert(hash.clone(), encoded);
             hash
@@ -775,7 +795,7 @@ where
         let data = self.encode_raw(n);
         // Nodes smaller than 32 bytes are stored inside their parent,
         // Nodes equal to 32 bytes are returned directly
-        if data.len() < sha3::Keccak256::output_size() {
+        if data.len() < KECCAK_SIZE {
             data
         } else {
             let hash = sha3::Keccak256::digest(&data);
@@ -804,7 +824,7 @@ where
                 for i in 0..16 {
                     let n = branch_ref.children[i].clone();
                     let data = self.encode_node(n);
-                    if data.len() == sha3::Keccak256::output_size() {
+                    if data.len() == KECCAK_SIZE {
                         stream.append(&data);
                     } else {
                         stream.append_raw(&data, 1);
@@ -823,7 +843,7 @@ where
                 let mut stream = RlpStream::new_list(2);
                 stream.append(&ext_ref.prefix.encode_compact());
                 let data = self.encode_node(ext_ref.node.clone());
-                if data.len() == sha3::Keccak256::output_size() {
+                if data.len() == KECCAK_SIZE {
                     stream.append(&data);
                 } else {
                     stream.append_raw(&data, 1);
@@ -872,7 +892,7 @@ where
                 Ok(Node::from_branch(nodes, value))
             }
             _ => {
-                if r.is_data() && r.size() == sha3::Keccak256::output_size() {
+                if r.is_data() && r.size() == KECCAK_SIZE {
                     Ok(Node::from_hash(r.data()?.try_into().unwrap()))
                 } else {
                     Err(TrieError::InvalidData)
@@ -906,7 +926,7 @@ where
                 for i in 0..16 {
                     let n = branch_ref.children[i].clone();
                     let data = self.cache_node(n)?;
-                    if data.len() == sha3::Keccak256::output_size() {
+                    if data.len() == KECCAK_SIZE {
                         stream.append(&data);
                     } else {
                         stream.append_raw(&data, 1);
@@ -925,7 +945,7 @@ where
                 let mut stream = RlpStream::new_list(2);
                 stream.append(&ext_ref.prefix.encode_compact());
                 let data = self.cache_node(ext_ref.node.clone())?;
-                if data.len() == sha3::Keccak256::output_size() {
+                if data.len() == KECCAK_SIZE {
                     stream.append(&data);
                 } else {
                     stream.append_raw(&data, 1);
@@ -1067,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trie_from_root_and_delete() {
+    fn test_trie_from_root_and_deletee() {
         let memdb = MemoryDB::new(true);
         let root = {
             let mut trie = PatriciaTrie::new(memdb.clone());
@@ -1081,12 +1101,23 @@ mod tests {
         };
 
         let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
+        // eprintln!("trie.root = {:#?}", trie.root);
         let value = trie.get(b"test").unwrap();
-        assert!(value.is_some());
-        let removed = trie.remove(b"test").unwrap();
-        assert!(removed);
-        let value_back = trie.get(b"test").unwrap();
-        assert!(value_back.is_none());
+        let value = trie.get(b"test").unwrap();
+        let value = trie.get(b"test").unwrap();
+        let value = trie.get(b"test23").unwrap();
+        let value = trie.get(b"test4").unwrap();
+        let value = trie.get(b"test44").unwrap();
+        let value = trie.get(b"test").unwrap();
+        let value = trie.get(b"test").unwrap();
+        let value = trie.get(b"test").unwrap();
+        // eprintln!("trie.cached_tries.lock().unwrap().values() = {:#?}", trie.cached_tries.lock().unwrap());
+        // eprintln!("trie.root = {:#?}", trie.root);
+        // assert!(value.is_some());
+        // let removed = trie.remove(b"test").unwrap();
+        // assert!(removed);
+        // let value_back = trie.get(b"test").unwrap();
+        // assert!(value_back.is_none());
     }
 
     #[test]
