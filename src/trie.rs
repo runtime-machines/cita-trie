@@ -1,11 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::hash::Hash;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rlp::{Prototype, Rlp, RlpStream};
 use sha3::Digest;
@@ -66,16 +64,12 @@ pub struct PatriciaTrie<D> {
     passing_keys: HashSet<[u8; 32]>,
     gen_keys: Arc<Mutex<HashSet<[u8; 32]>>>,
 
-    cached_tries: Arc<Mutex<HashMap<[u8; 32], ManuallyDrop<PatriciaTrie<D>>>>>,
+    cached_tries: Arc<RwLock<HashMap<[u8; 32], PatriciaTrie<D>>>>,
 }
 
 impl<D> Drop for PatriciaTrie<D> {
     fn drop(&mut self) {
-        eprintln!("HERE");
-        unsafe { Node::deallocate(self.root.clone()) };
-        for (_, cached_trie) in self.cached_tries.lock().unwrap().drain() {
-            ManuallyDrop::into_inner(cached_trie);
-        }
+        unsafe { Node::deallocate(self.root.clone()) }
     }
 }
 
@@ -456,13 +450,15 @@ where
                 // and return a value from it.
                 // Otherwise return a value and add a node to the cache.
                 let hash = hash_node.as_ref().hash;
-                let mut cached_tries = self.cached_tries.lock().unwrap();
-                if let Some(trie) = cached_tries.get(&hash) {
+                let cached_tries_ref = self.cached_tries.read().unwrap();
+                if let Some(trie) = cached_tries_ref.get(&hash) {
                     trie.get_at(trie.root.clone(), partial)
                 } else {
                     let trie = PatriciaTrie::from(self.db.clone(), hash.as_slice()).unwrap();
                     let result = trie.get_at(trie.root.clone(), partial)?;
-                    cached_tries.insert(hash, ManuallyDrop::new(trie));
+                    drop(cached_tries_ref);
+                    let mut cached_tries_mut = self.cached_tries.write().unwrap();
+                    cached_tries_mut.insert(hash, trie);
                     Ok(result)
                 }
             },
@@ -1087,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trie_from_root_and_deletee() {
+    fn test_trie_from_root_and_delete() {
         let memdb = MemoryDB::new(true);
         let root = {
             let mut trie = PatriciaTrie::new(memdb.clone());
@@ -1101,23 +1097,12 @@ mod tests {
         };
 
         let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
-        // eprintln!("trie.root = {:#?}", trie.root);
         let value = trie.get(b"test").unwrap();
-        let value = trie.get(b"test").unwrap();
-        let value = trie.get(b"test").unwrap();
-        let value = trie.get(b"test23").unwrap();
-        let value = trie.get(b"test4").unwrap();
-        let value = trie.get(b"test44").unwrap();
-        let value = trie.get(b"test").unwrap();
-        let value = trie.get(b"test").unwrap();
-        let value = trie.get(b"test").unwrap();
-        // eprintln!("trie.cached_tries.lock().unwrap().values() = {:#?}", trie.cached_tries.lock().unwrap());
-        // eprintln!("trie.root = {:#?}", trie.root);
-        // assert!(value.is_some());
-        // let removed = trie.remove(b"test").unwrap();
-        // assert!(removed);
-        // let value_back = trie.get(b"test").unwrap();
-        // assert!(value_back.is_none());
+        assert!(value.is_some());
+        let removed = trie.remove(b"test").unwrap();
+        assert!(removed);
+        let value_back = trie.get(b"test").unwrap();
+        assert!(value_back.is_none());
     }
 
     #[test]
