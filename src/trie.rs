@@ -60,6 +60,7 @@ pub struct PatriciaTrie<D> {
     db: D,
     backup_db: Option<D>,
 
+    /// Hash of the node mapped to the node's binary representation
     cache: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     /// Hashes of nodes that were expanded during insert/delete ops.
     /// If expanded node is modified, it is deleted from the database.
