@@ -60,7 +60,7 @@ pub struct PatriciaTrie<D> {
     db: D,
     backup_db: Option<D>,
 
-    /// Hash of the node mapped to the node's binary representation
+    /// Hash of the node binary mapped to the binary itself
     cache: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     /// Hashes of nodes that were expanded during insert/delete ops.
     /// If expanded node is modified, it is deleted from the database.
@@ -302,16 +302,16 @@ where
 
         let mut addr_list = vec![];
         pt.iter().for_each(|(k, _v)| addr_list.push(k));
-        let encoded = pt.cache_node(root)?;
+        let mut cache: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        let encoded = pt.cache_node(root, &mut cache)?;
         {
-            let mut cache = pt.cache.lock().unwrap();
             cache.insert(sha3::Keccak256::digest(&encoded).to_vec(), encoded);
 
             // store data in backup db
             pt.backup_db
                 .clone()
                 .unwrap()
-                .insert_batch(cache.drain())
+                .insert_batch(cache)
                 .map_err(|e| TrieError::DB(e.to_string()))?;
         }
         pt.backup_db
@@ -909,7 +909,7 @@ where
         }
     }
 
-    fn cache_node(&self, n: Node) -> TrieResult<Vec<u8>> {
+    fn cache_node(&self, n: Node, cache: &mut HashMap<Vec<u8>, Vec<u8>>) -> TrieResult<Vec<u8>> {
         match n {
             Node::Empty => Ok(rlp::NULL_RLP.to_vec()),
             Node::Leaf(leaf) => {
@@ -926,7 +926,7 @@ where
                 let mut stream = RlpStream::new_list(17);
                 for i in 0..16 {
                     let n = branch_ref.children[i].clone();
-                    let data = self.cache_node(n)?;
+                    let data = self.cache_node(n, cache)?;
                     if data.len() == KECCAK_SIZE {
                         stream.append(&data);
                     } else {
@@ -945,7 +945,7 @@ where
 
                 let mut stream = RlpStream::new_list(2);
                 stream.append(&ext_ref.prefix.encode_compact());
-                let data = self.cache_node(ext_ref.node.clone())?;
+                let data = self.cache_node(ext_ref.node.clone(), cache)?;
                 if data.len() == KECCAK_SIZE {
                     stream.append(&data);
                 } else {
@@ -956,9 +956,9 @@ where
             Node::Hash(hash_node) => {
                 let hash = unsafe { hash_node.as_ref() }.hash;
                 let next_node = self.recover_from_db(&hash)?;
-                let data = self.cache_node(next_node.clone())?;
+                let data = self.cache_node(next_node.clone(), cache)?;
                 unsafe { Node::deallocate(next_node) };
-                self.cache.lock().unwrap().insert(hash.to_vec(), data);
+                cache.insert(hash.to_vec(), data);
                 Ok(hash.to_vec())
             }
         }
