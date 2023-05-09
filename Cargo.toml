@@ -15,6 +15,10 @@ documentation = "https://docs.rs/cita_trie"
 parking_lot = "0.12"
 rlp = "0.5"
 sha3 = "0.10.6"
+tracing = { version = "0.1.37", optional = true }
+
+[features]
+tracing = ["dep:tracing"]
 
 [dev-dependencies]
 rand = "0.7"

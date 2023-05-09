@@ -188,7 +188,10 @@ where
                             self.recovered_nodes.borrow_mut().push(n.clone());
                             self.nodes.push(n.into());
                         } else {
-                            // todo: log / tracing warn here, as it is error
+                            #[cfg(feature = "tracing")]
+                            tracing::error!(
+                                "Iterator::next - Could not recover hash node from database"
+                            );
                             return None;
                         }
                     }
