@@ -61,9 +61,12 @@ pub struct PatriciaTrie<D> {
     backup_db: Option<D>,
 
     cache: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
-    passing_keys: HashSet<[u8; 32]>,
-    gen_keys: Arc<Mutex<HashSet<[u8; 32]>>>,
+    /// Hashes of nodes that were expanded during insert/delete ops.
+    /// If expanded node is modified, it is deleted from the database.
+    recovered_nodes_hashes: HashSet<[u8; 32]>,
 
+    /// Expanded nodes in `get` op. We cache them not to expand each time.
+    /// Make it Arc<RwLock<_>> to be thread safe (Send + Sync)
     cached_tries: Arc<RwLock<HashMap<[u8; 32], PatriciaTrie<D>>>>,
 }
 
@@ -241,8 +244,7 @@ where
             root_hash: sha3::Keccak256::digest(rlp::NULL_RLP.as_ref()).to_vec(),
 
             cache: Default::default(),
-            passing_keys: Default::default(),
-            gen_keys: Default::default(),
+            recovered_nodes_hashes: Default::default(),
 
             db,
             backup_db: None,
@@ -259,8 +261,7 @@ where
                     root_hash: root.to_vec(),
 
                     cache: Default::default(),
-                    passing_keys: Default::default(),
-                    gen_keys: Default::default(),
+                    recovered_nodes_hashes: Default::default(),
 
                     db,
                     backup_db: None,
@@ -286,8 +287,7 @@ where
             root_hash: sha3::Keccak256::digest(rlp::NULL_RLP.as_ref()).to_vec(),
 
             cache: Default::default(),
-            passing_keys: Default::default(),
-            gen_keys: Default::default(),
+            recovered_nodes_hashes: Default::default(),
 
             db,
             backup_db: Some(backup_db),
@@ -377,10 +377,11 @@ where
             Node::Empty => {}
             _ => path.push(self.root.clone()),
         }
+        let mut _gen_keys = HashSet::new();
         let proof = Ok(path
             .iter()
             .rev()
-            .map(|n| self.encode_raw(n.clone()))
+            .map(|n| self.encode_raw(n.clone(), &mut _gen_keys))
             .collect());
         if !path.is_empty() {
             // exclude root
@@ -567,7 +568,7 @@ where
                 // Consume hash node and insert in-place an expanded node
                 let hash_node_owned = unsafe { to_owned(hash_node) };
 
-                self.passing_keys.insert(hash_node_owned.hash);
+                self.recovered_nodes_hashes.insert(hash_node_owned.hash);
                 let n = self.recover_from_db(&hash_node_owned.hash)?;
                 self.insert_at(n, partial, value)
             }
@@ -626,7 +627,7 @@ where
             Node::Hash(hash_node) => {
                 // Consume hash node and insert in-place an expanded node
                 let hash_node_owned = unsafe { to_owned(hash_node) };
-                self.passing_keys.insert(hash_node_owned.hash);
+                self.recovered_nodes_hashes.insert(hash_node_owned.hash);
                 let n = self.recover_from_db(&hash_node_owned.hash)?;
                 self.delete_at(n, partial)
             }
@@ -694,7 +695,7 @@ where
                     // try again after recovering node from the db.
                     Node::Hash(hash_node) => unsafe {
                         let hash = hash_node.as_ref().hash;
-                        self.passing_keys.insert(hash);
+                        self.recovered_nodes_hashes.insert(hash);
                         let recovered_node = self.recover_from_db(&hash)?;
                         let n = Node::from_extension(ext_ref.prefix.clone(), recovered_node);
                         to_owned(ext);
@@ -749,7 +750,8 @@ where
     }
 
     fn commit(&mut self) -> TrieResult<Vec<u8>> {
-        let encoded = self.encode_node(self.root.clone());
+        let mut generated_hashes = HashSet::<[u8; 32]>::new();
+        let encoded = self.encode_node(self.root.clone(), &mut generated_hashes);
         let mut cache = self.cache.lock().unwrap();
         let root_hash = if encoded.len() < KECCAK_SIZE {
             let hash = sha3::Keccak256::digest(&encoded).to_vec();
@@ -764,34 +766,34 @@ where
             .map_err(|e| TrieError::DB(e.to_string()))?;
         drop(cache);
 
-        let mut gen_keys = self.gen_keys.lock().unwrap();
-        let removed_keys: Vec<Vec<u8>> = self
-            .passing_keys
-            .iter()
-            .filter(|h| !gen_keys.contains(*h))
+        // Remove all recovered node hashes from the database which are now invalid, i.e.
+        // the root was changed so the hash was also changed.
+        let keys_to_remove = self
+            .recovered_nodes_hashes
+            .difference(&generated_hashes)
             .map(|h| h.to_vec())
-            .collect();
+            .collect::<Vec<Vec<u8>>>();
 
         self.db
-            .remove_batch(removed_keys)
+            .remove_batch(keys_to_remove)
             .map_err(|e| TrieError::DB(e.to_string()))?;
 
         self.root_hash = root_hash.to_vec();
-        gen_keys.clear();
-        drop(gen_keys);
-        self.passing_keys.clear();
+        self.recovered_nodes_hashes.clear();
         unsafe { Node::deallocate(self.root.clone()) };
         self.root = self.recover_from_db(&root_hash)?;
         Ok(root_hash)
     }
 
-    fn encode_node(&self, n: Node) -> Vec<u8> {
+    /// `gen_hashes` are the buffer for generated hashes of nodes, which
+    /// are bigger than 32 bytes.
+    fn encode_node(&self, n: Node, gen_hashes: &mut HashSet<[u8; 32]>) -> Vec<u8> {
         // Returns the hash value directly to avoid double counting.
         if let Node::Hash(hash_node) = n {
             return unsafe { hash_node.as_ref() }.hash.to_vec();
         }
 
-        let data = self.encode_raw(n);
+        let data = self.encode_raw(n, gen_hashes);
         // Nodes smaller than 32 bytes are stored inside their parent,
         // Nodes equal to 32 bytes are returned directly
         if data.len() < KECCAK_SIZE {
@@ -799,13 +801,12 @@ where
         } else {
             let hash = sha3::Keccak256::digest(&data);
             self.cache.lock().unwrap().insert(hash.to_vec(), data);
-
-            self.gen_keys.lock().unwrap().insert(hash.into());
+            gen_hashes.insert(hash.into());
             hash.to_vec()
         }
     }
 
-    fn encode_raw(&self, n: Node) -> Vec<u8> {
+    fn encode_raw(&self, n: Node, gen_hashes: &mut HashSet<[u8; 32]>) -> Vec<u8> {
         match n {
             Node::Empty => rlp::NULL_RLP.to_vec(),
             Node::Leaf(leaf) => {
@@ -822,7 +823,7 @@ where
                 let mut stream = RlpStream::new_list(17);
                 for i in 0..16 {
                     let n = branch_ref.children[i].clone();
-                    let data = self.encode_node(n);
+                    let data = self.encode_node(n, gen_hashes);
                     if data.len() == KECCAK_SIZE {
                         stream.append(&data);
                     } else {
@@ -841,7 +842,7 @@ where
 
                 let mut stream = RlpStream::new_list(2);
                 stream.append(&ext_ref.prefix.encode_compact());
-                let data = self.encode_node(ext_ref.node.clone());
+                let data = self.encode_node(ext_ref.node.clone(), gen_hashes);
                 if data.len() == KECCAK_SIZE {
                     stream.append(&data);
                 } else {
@@ -1305,4 +1306,28 @@ mod tests {
 
         assert!(PatriciaTrie::extract_backup(memdb, memdb2, &hash).is_ok());
     }
+
+    // #[test]
+    // fn my() {
+    //     let memdb = MemoryDB::new(true);
+    //     let root = {
+    //         let mut trie = PatriciaTrie::new(memdb.clone());
+    //         trie.insert(b"test".to_vec(), b"test".to_vec()).unwrap();
+    //         trie.insert(b"test1".to_vec(), b"test".to_vec()).unwrap();
+    //         trie.insert(b"test2".to_vec(), b"test".to_vec()).unwrap();
+    //         trie.insert(b"test23".to_vec(), b"test".to_vec()).unwrap();
+    //         trie.insert(b"test33".to_vec(), b"test".to_vec()).unwrap();
+    //         trie.insert(b"test44".to_vec(), b"test".to_vec()).unwrap();
+    //         trie.commit().unwrap()
+    //     };
+    //
+    //     let mut trie = PatriciaTrie::from(memdb, &root).unwrap();
+    //     let value = trie.get(b"test").unwrap();
+    //     assert!(value.is_some());
+    //     // eprintln!("trie.root = {:#?}", trie.root);
+    //     trie.insert(b"test".to_vec(), b"qewr".to_vec()).unwrap();
+    //     trie.insert(b"test2".to_vec(), b"qewr".to_vec()).unwrap();
+    //     trie.insert(b"tes".to_vec(), b"qewr".to_vec()).unwrap();
+    //     // eprintln!("trie.root = {:#?}", trie.root);
+    // }
 }
