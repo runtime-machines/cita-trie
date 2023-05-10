@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::iter::FromIterator;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use rlp::{Prototype, Rlp, RlpStream};
 use sha3::Digest;
@@ -60,8 +61,6 @@ pub struct PatriciaTrie<D> {
     db: D,
     backup_db: Option<D>,
 
-    /// Hash of the node binary mapped to the binary itself
-    cache: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
     /// Hashes of nodes that were expanded during insert/delete ops.
     /// If expanded node is modified, it is deleted from the database.
     recovered_nodes_hashes: HashSet<[u8; 32]>,
@@ -244,7 +243,6 @@ where
             root: Node::Empty,
             root_hash: sha3::Keccak256::digest(rlp::NULL_RLP.as_ref()).to_vec(),
 
-            cache: Default::default(),
             recovered_nodes_hashes: Default::default(),
 
             db,
@@ -261,7 +259,6 @@ where
                     root: Node::Empty,
                     root_hash: root.to_vec(),
 
-                    cache: Default::default(),
                     recovered_nodes_hashes: Default::default(),
 
                     db,
@@ -287,7 +284,6 @@ where
             root: Node::Empty,
             root_hash: sha3::Keccak256::digest(rlp::NULL_RLP.as_ref()).to_vec(),
 
-            cache: Default::default(),
             recovered_nodes_hashes: Default::default(),
 
             db,
@@ -378,11 +374,11 @@ where
             Node::Empty => {}
             _ => path.push(self.root.clone()),
         }
-        let mut _gen_keys = HashSet::new();
+        let mut _cache = HashMap::new();
         let proof = Ok(path
             .iter()
             .rev()
-            .map(|n| self.encode_raw(n.clone(), &mut _gen_keys))
+            .map(|n| self.encode_raw(n.clone(), &mut _cache))
             .collect());
         if !path.is_empty() {
             // exclude root
@@ -751,63 +747,62 @@ where
     }
 
     fn commit(&mut self) -> TrieResult<Vec<u8>> {
-        let mut generated_hashes = HashSet::<[u8; 32]>::new();
-        let encoded = self.encode_node(self.root.clone(), &mut generated_hashes);
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = HashMap::new();
+        let encoded = self.encode_node(self.root.clone(), &mut cache);
         let root_hash = if encoded.len() < KECCAK_SIZE {
-            let hash = sha3::Keccak256::digest(&encoded).to_vec();
-            cache.insert(hash.clone(), encoded);
-            hash
+            let hash = sha3::Keccak256::digest(&encoded);
+            cache.insert(hash.to_vec(), encoded);
+            hash.to_vec()
         } else {
             encoded
         };
 
-        self.db
-            .insert_batch(cache.drain())
-            .map_err(|e| TrieError::DB(e.to_string()))?;
-        drop(cache);
+        let cached_keys: HashSet<[u8; 32]> =
+            HashSet::from_iter(cache.keys().map(|k| k.as_slice().try_into().unwrap()));
 
         // Remove all recovered node hashes from the database which are now invalid, i.e.
         // the root was changed so the hash was also changed.
         let keys_to_remove = self
             .recovered_nodes_hashes
-            .difference(&generated_hashes)
+            .difference(&cached_keys)
             .map(|h| h.to_vec())
             .collect::<Vec<Vec<u8>>>();
+
+        self.db
+            .insert_batch(cache)
+            .map_err(|e| TrieError::DB(e.to_string()))?;
 
         self.db
             .remove_batch(keys_to_remove)
             .map_err(|e| TrieError::DB(e.to_string()))?;
 
-        self.root_hash = root_hash.to_vec();
+        self.root_hash = root_hash.clone();
         self.recovered_nodes_hashes.clear();
         unsafe { Node::deallocate(self.root.clone()) };
-        self.root = self.recover_from_db(&root_hash)?;
+        self.root = self.recover_from_db(&self.root_hash)?;
         Ok(root_hash)
     }
 
-    /// `gen_hashes` are the buffer for generated hashes of nodes, which
-    /// are bigger than 32 bytes.
-    fn encode_node(&self, n: Node, gen_hashes: &mut HashSet<[u8; 32]>) -> Vec<u8> {
+    /// `cache` is the buffer for generated hashes of nodes mapped to raw data.
+    fn encode_node(&self, n: Node, cache: &mut HashMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
         // Returns the hash value directly to avoid double counting.
         if let Node::Hash(hash_node) = n {
             return unsafe { hash_node.as_ref() }.hash.to_vec();
         }
 
-        let data = self.encode_raw(n, gen_hashes);
+        let data = self.encode_raw(n, cache);
         // Nodes smaller than 32 bytes are stored inside their parent,
         // Nodes equal to 32 bytes are returned directly
         if data.len() < KECCAK_SIZE {
             data
         } else {
             let hash = sha3::Keccak256::digest(&data);
-            self.cache.lock().unwrap().insert(hash.to_vec(), data);
-            gen_hashes.insert(hash.into());
+            cache.insert(hash.to_vec(), data);
             hash.to_vec()
         }
     }
 
-    fn encode_raw(&self, n: Node, gen_hashes: &mut HashSet<[u8; 32]>) -> Vec<u8> {
+    fn encode_raw(&self, n: Node, cache: &mut HashMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
         match n {
             Node::Empty => rlp::NULL_RLP.to_vec(),
             Node::Leaf(leaf) => {
@@ -824,7 +819,7 @@ where
                 let mut stream = RlpStream::new_list(17);
                 for i in 0..16 {
                     let n = branch_ref.children[i].clone();
-                    let data = self.encode_node(n, gen_hashes);
+                    let data = self.encode_node(n, cache);
                     if data.len() == KECCAK_SIZE {
                         stream.append(&data);
                     } else {
@@ -843,7 +838,7 @@ where
 
                 let mut stream = RlpStream::new_list(2);
                 stream.append(&ext_ref.prefix.encode_compact());
-                let data = self.encode_node(ext_ref.node.clone(), gen_hashes);
+                let data = self.encode_node(ext_ref.node.clone(), cache);
                 if data.len() == KECCAK_SIZE {
                     stream.append(&data);
                 } else {
