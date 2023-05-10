@@ -50,7 +50,7 @@ fn main() {
 
 ```
 
-## Test
+## Test with Miri
 
 ```sh
 cargo clean
