@@ -66,7 +66,6 @@ pub struct PatriciaTrie<D> {
     recovered_nodes_hashes: HashSet<[u8; 32]>,
 
     /// Expanded nodes in `get` op. We cache them not to expand each time.
-    /// Make it Arc<RwLock<_>> to be thread safe (Send + Sync)
     cached_tries: Arc<RwLock<HashMap<[u8; 32], PatriciaTrie<D>>>>,
 }
 
