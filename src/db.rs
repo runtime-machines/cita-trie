@@ -16,40 +16,40 @@ pub trait DB: Send + Sync {
 
     fn contains(&self, key: &[u8]) -> Result<bool, Self::Error>;
 
-    /// Insert data into the cache.
+    /// Inserts data into the cache.
     fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Self::Error>;
 
-    /// Insert data into the cache.
+    /// Removes data from the cache.
     fn remove(&self, key: &[u8]) -> Result<(), Self::Error>;
 
-    /// Insert a batch of data into the cache.
-    fn insert_batch(&self, keys: Vec<Vec<u8>>, values: Vec<Vec<u8>>) -> Result<(), Self::Error> {
-        for i in 0..keys.len() {
-            let key = keys[i].clone();
-            let value = values[i].clone();
+    /// Inserts a batch of data into the cache.
+    fn insert_batch<I>(&self, items: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    {
+        for (key, value) in items {
             self.insert(key, value)?;
         }
+
         Ok(())
     }
 
-    /// Remove a batch of data into the cache.
-    fn remove_batch(&self, keys: &[Vec<u8>]) -> Result<(), Self::Error> {
+    /// Removes a batch of data into the cache.
+    fn remove_batch<I: IntoIterator<Item = A>, A: AsRef<[u8]>>(
+        &self,
+        keys: I,
+    ) -> Result<(), Self::Error> {
         for key in keys {
-            self.remove(key)?;
+            self.remove(key.as_ref())?;
         }
         Ok(())
     }
 
-    /// Flush data to the DB from the cache.
+    /// Flushes data to the DB from the cache.
     fn flush(&self) -> Result<(), Self::Error>;
-
-    #[cfg(test)]
-    fn len(&self) -> Result<usize, Self::Error>;
-    #[cfg(test)]
-    fn is_empty(&self) -> Result<bool, Self::Error>;
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct MemoryDB {
     // If "light" is true, the data is deleted from the database at the time of submission.
     light: bool,
@@ -69,11 +69,7 @@ impl DB for MemoryDB {
     type Error = MemDBError;
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
-        if let Some(value) = self.storage.read().get(key) {
-            Ok(Some(value.clone()))
-        } else {
-            Ok(None)
-        }
+        Ok(self.storage.read().get(key).cloned())
     }
 
     fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Self::Error> {
@@ -95,14 +91,29 @@ impl DB for MemoryDB {
     fn flush(&self) -> Result<(), Self::Error> {
         Ok(())
     }
+}
 
-    #[cfg(test)]
-    fn len(&self) -> Result<usize, Self::Error> {
-        Ok(self.storage.try_read().unwrap().len())
+impl<T: ?Sized + DB> DB for Arc<T> {
+    type Error = T::Error;
+
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
+        T::get(self, key)
     }
-    #[cfg(test)]
-    fn is_empty(&self) -> Result<bool, Self::Error> {
-        Ok(self.storage.try_read().unwrap().is_empty())
+
+    fn contains(&self, key: &[u8]) -> Result<bool, Self::Error> {
+        T::contains(self, key)
+    }
+
+    fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Self::Error> {
+        T::insert(self, key, value)
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<(), Self::Error> {
+        T::remove(self, key)
+    }
+
+    fn flush(&self) -> Result<(), Self::Error> {
+        T::flush(self)
     }
 }
 

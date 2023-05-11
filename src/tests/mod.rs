@@ -2,25 +2,21 @@
 mod trie_tests {
     use hex::FromHex;
     use rand::Rng;
-    use std::sync::Arc;
-
-    use hasher::HasherKeccak;
 
     use crate::db::MemoryDB;
     use crate::trie::{PatriciaTrie, Trie};
     use crate::verify_proof;
 
     fn assert_root(data: Vec<(&[u8], &[u8])>, hash: &str) {
-        let memdb = Arc::new(MemoryDB::new(true));
-        let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::new(HasherKeccak::new()));
+        let memdb = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb.clone());
         for (k, v) in data.into_iter() {
             trie.insert(k.to_vec(), v.to_vec()).unwrap();
         }
         let r = trie.root().unwrap();
         let rs = format!("0x{}", hex::encode(r.clone()));
         assert_eq!(rs.as_str(), hash);
-        let mut trie =
-            PatriciaTrie::from(Arc::clone(&memdb), Arc::new(HasherKeccak::new()), &r).unwrap();
+        let mut trie = PatriciaTrie::from(memdb, &r).unwrap();
         let r2 = trie.root().unwrap();
         let rs2 = format!("0x{}", hex::encode(r2));
         assert_eq!(rs2.as_str(), hash);
@@ -551,9 +547,10 @@ mod trie_tests {
     // - https://github.com/ethereum/go-ethereum/blob/master/trie/proof_test.go
     // - https://github.com/ethereum/py-trie/blob/master/tests/test_proof.py
     #[test]
+    // #[ignore]
     fn test_proof_basic() {
-        let memdb = Arc::new(MemoryDB::new(true));
-        let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::new(HasherKeccak::new()));
+        let memdb = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb);
         trie.insert(b"doe".to_vec(), b"reindeer".to_vec()).unwrap();
         trie.insert(b"dog".to_vec(), b"puppy".to_vec()).unwrap();
         trie.insert(b"dogglesworth".to_vec(), b"cat".to_vec())
@@ -582,7 +579,7 @@ mod trie_tests {
         let value = trie.verify_proof(&root, b"doe", proof.clone()).unwrap();
         assert_eq!(value, Some(b"reindeer".to_vec()));
         assert_eq!(
-            verify_proof(&root, b"doe", proof, HasherKeccak::new()).unwrap(),
+            verify_proof(&root, b"doe", proof).unwrap(),
             Some(b"reindeer".to_vec())
         );
 
@@ -603,28 +600,25 @@ mod trie_tests {
         );
         let value = trie.verify_proof(&root, b"dogg", proof.clone()).unwrap();
         assert_eq!(value, None);
-        assert_eq!(
-            verify_proof(&root, b"dogg", proof, HasherKeccak::new()).unwrap(),
-            None
-        );
+        assert_eq!(verify_proof(&root, b"dogg", proof).unwrap(), None);
 
         // empty proof
         let proof = vec![];
         let value = trie.verify_proof(&root, b"doe", proof.clone());
-        assert!(verify_proof(&root, b"doe", proof, HasherKeccak::new()).is_err());
+        assert!(verify_proof(&root, b"doe", proof).is_err());
         assert!(value.is_err());
 
         // bad proof
         let proof = vec![b"aaa".to_vec(), b"ccc".to_vec()];
         let value = trie.verify_proof(&root, b"doe", proof.clone());
         assert!(value.is_err());
-        assert!(verify_proof(&root, b"doe", proof, HasherKeccak::new()).is_err());
+        assert!(verify_proof(&root, b"doe", proof).is_err());
     }
 
     #[test]
     fn test_proof_random() {
-        let memdb = Arc::new(MemoryDB::new(true));
-        let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::new(HasherKeccak::new()));
+        let memdb = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb);
         let mut rng = rand::thread_rng();
         let mut keys = vec![];
         for _ in 0..100 {
@@ -646,19 +640,14 @@ mod trie_tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(value, k);
-            assert_eq!(
-                verify_proof(&root, &k, proof, HasherKeccak::new())
-                    .unwrap()
-                    .unwrap(),
-                k
-            );
+            assert_eq!(verify_proof(&root, &k, proof).unwrap().unwrap(), k);
         }
     }
 
     #[test]
     fn test_proof_empty_trie() {
-        let memdb = Arc::new(MemoryDB::new(true));
-        let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::new(HasherKeccak::new()));
+        let memdb = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb);
         trie.root().unwrap();
         let proof = trie.get_proof(b"not-exist").unwrap();
         assert_eq!(proof.len(), 0);
@@ -666,8 +655,8 @@ mod trie_tests {
 
     #[test]
     fn test_proof_one_element() {
-        let memdb = Arc::new(MemoryDB::new(true));
-        let mut trie = PatriciaTrie::new(Arc::clone(&memdb), Arc::new(HasherKeccak::new()));
+        let memdb = MemoryDB::new(true);
+        let mut trie = PatriciaTrie::new(memdb);
         trie.insert(b"k".to_vec(), b"v".to_vec()).unwrap();
         let root = trie.root().unwrap();
         let proof = trie.get_proof(b"k").unwrap();
@@ -681,7 +670,7 @@ mod trie_tests {
         let value = trie.verify_proof(&root, b"k", proof.clone()).unwrap();
         assert_eq!(value, Some(b"v".to_vec()));
         assert_eq!(
-            verify_proof(&root, b"k", proof, HasherKeccak::new()).unwrap(),
+            verify_proof(&root, b"k", proof).unwrap(),
             Some(b"v".to_vec())
         );
     }
