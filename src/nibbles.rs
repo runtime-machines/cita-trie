@@ -160,10 +160,6 @@ impl NibbleVec {
         (raw, is_leaf)
     }
 
-    pub fn _get_data(&self) -> &[u8] {
-        &self.hex_data
-    }
-
     pub fn join(&self, b: &NibbleVec) -> NibbleVec {
         let mut hex_data = Vec::with_capacity(self.hex_data.len() + b.hex_data.len());
         hex_data.extend_from_slice(&self.hex_data);
